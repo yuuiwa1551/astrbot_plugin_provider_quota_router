@@ -1,0 +1,108 @@
+{
+  "enabled": {
+    "description": "启用插件",
+    "type": "bool",
+    "hint": "关闭后不做 provider 路由，也不记录 pending reservation。",
+    "default": true
+  },
+  "timezone": {
+    "description": "统计时区",
+    "type": "string",
+    "hint": "用于计算每日重置窗口，例如 Asia/Shanghai。",
+    "default": "Asia/Shanghai"
+  },
+  "reset_time": {
+    "description": "每日额度重置时间",
+    "type": "string",
+    "hint": "格式 HH:MM，例如 00:00 或 04:30。",
+    "default": "00:00"
+  },
+  "default_daily_limit_tokens": {
+    "description": "默认每日额度",
+    "type": "int",
+    "hint": "单位 token。火山活动当前可配置为 2000000，但不要依赖硬编码。",
+    "default": 2000000
+  },
+  "default_safety_buffer_tokens": {
+    "description": "安全余量",
+    "type": "int",
+    "hint": "判断是否可用时会预留这些 token，降低实际越线概率。",
+    "default": 100000
+  },
+  "default_request_reservation_tokens": {
+    "description": "单请求预占 token",
+    "type": "int",
+    "hint": "请求发出前无法知道真实 usage，因此先按该值预占。",
+    "default": 50000
+  },
+  "reservation_ttl_seconds": {
+    "description": "预占超时时间",
+    "type": "int",
+    "hint": "异常请求未完成时，pending reservation 最多保留多少秒。",
+    "default": 1800
+  },
+  "overlay_ttl_seconds": {
+    "description": "响应后临时叠加时间",
+    "type": "int",
+    "hint": "响应 usage 会先临时叠加一段时间，等待 AstrBot ProviderStat 异步落库。",
+    "default": 180
+  },
+  "count_cached_input_tokens": {
+    "description": "统计缓存输入 token",
+    "type": "bool",
+    "hint": "开启后按 input_other + input_cached + output 统计，更保守。",
+    "default": true
+  },
+  "quota_key_mode": {
+    "description": "额度统计维度",
+    "type": "string",
+    "hint": "provider_model 更符合单一模型额度；provider_id 适合按供应商配置隔离。",
+    "default": "provider_model",
+    "options": ["provider_model", "provider_id"],
+    "option_labels": ["按模型名", "按 Provider ID"]
+  },
+  "exhausted_action": {
+    "description": "链路耗尽后的行为",
+    "type": "string",
+    "hint": "stop 会阻断 LLM；allow_paid 继续原 provider；use_last 使用链路最后一个 provider。",
+    "default": "stop",
+    "options": ["stop", "allow_paid", "use_last"],
+    "option_labels": ["阻断请求", "允许付费风险", "使用最后一级"]
+  },
+  "dry_run": {
+    "description": "演练模式",
+    "type": "bool",
+    "hint": "开启后只记录决策，不实际切换 provider 或预占额度。",
+    "default": false
+  },
+  "use_astrbot_fallback_chain": {
+    "description": "使用 AstrBot 默认 fallback 链",
+    "type": "bool",
+    "hint": "chains_json 为空时，自动使用 default_provider_id + fallback_chat_models。",
+    "default": true
+  },
+  "chains_json": {
+    "description": "自定义路由链 JSON",
+    "type": "text",
+    "hint": "留空时使用 AstrBot 默认链。格式为数组：[{\"name\":\"doubao\",\"providers\":[\"provider-a\",\"provider-b\"],\"daily_limit_tokens\":2000000}]。",
+    "default": ""
+  },
+  "allow_status_for_all": {
+    "description": "允许所有人查看状态",
+    "type": "bool",
+    "hint": "关闭后只有 admin_user_ids 可使用 /quota status。",
+    "default": true
+  },
+  "admin_user_ids": {
+    "description": "管理员用户 ID",
+    "type": "list",
+    "hint": "为空时不限制管理命令；填写后只有这些发送者可 reload/reset/dry-run。",
+    "default": []
+  },
+  "exhausted_message": {
+    "description": "额度耗尽提示",
+    "type": "text",
+    "hint": "链路耗尽且 exhausted_action=stop 时发送。可用变量：{refresh_time}。",
+    "default": "当前模型链路今日免费 token 额度已用尽，将在 {refresh_time} 后恢复。"
+  }
+}

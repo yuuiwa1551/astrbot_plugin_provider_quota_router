@@ -1,0 +1,1 @@
+# No extra runtime dependencies. AstrBot provides sqlmodel and core APIs.

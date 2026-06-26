@@ -1,0 +1,13 @@
+name: astrbot_plugin_provider_quota_router
+desc: 按 provider/model 每日 token 额度自动降级路由 AstrBot 聊天模型。
+short_desc: Provider 日额度路由
+version: 0.1.0
+author: yuuiwa1551
+repo: "https://github.com/yuuiwa1551/astrbot_plugin_provider_quota_router"
+display_name: Provider 额度路由
+support_platforms:
+  - aiocqhttp
+  - qq_official
+  - qq_official_webhook
+  - webchat
+astrbot_version: ">=4.24.0"
