@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.0
+
+- 增加 AstrBot Plugin Page 状态面板。
+- 增加 `/status`、`/chains`、`/decisions`、`/export` Web API。
+- 增加 80% / 90% / 95% 用量告警、链路耗尽告警、每日 snapshot 和 CSV 导出。
+
 ## v0.1.0
 
 - 初始 1 期版本。

@@ -1,0 +1,675 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Provider 额度路由</title>
+    <script src="/api/plugin/page/bridge-sdk.js"></script>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f5f7fa;
+        --panel: #ffffff;
+        --text: #1c2430;
+        --muted: #647185;
+        --line: #dce3ec;
+        --accent: #2563eb;
+        --green: #14845f;
+        --red: #c2413a;
+        --yellow: #a96f00;
+        --soft-blue: #e8f0ff;
+        --soft-green: #e8f7f0;
+        --soft-red: #fdeceb;
+        --soft-yellow: #fff4d8;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: var(--bg);
+        color: var(--text);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+        letter-spacing: 0;
+      }
+
+      button,
+      input {
+        font: inherit;
+      }
+
+      .app {
+        max-width: 1280px;
+        margin: 0 auto;
+        padding: 22px;
+      }
+
+      .toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        margin-bottom: 16px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 22px;
+        line-height: 1.2;
+      }
+
+      .subtle {
+        margin-top: 5px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+      }
+
+      .date-input {
+        height: 34px;
+        min-width: 150px;
+        border: 1px solid var(--line);
+        background: #fff;
+        border-radius: 6px;
+        padding: 0 9px;
+        color: var(--text);
+      }
+
+      .button {
+        height: 34px;
+        border: 1px solid var(--line);
+        background: #fff;
+        color: var(--text);
+        border-radius: 6px;
+        padding: 0 12px;
+        cursor: pointer;
+      }
+
+      .button.primary {
+        border-color: var(--accent);
+        background: var(--accent);
+        color: #fff;
+      }
+
+      .button:disabled {
+        cursor: wait;
+        opacity: 0.7;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 340px;
+        gap: 16px;
+        align-items: start;
+      }
+
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        min-width: 0;
+      }
+
+      .panel-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 12px;
+        padding: 16px 18px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .panel-title {
+        margin: 0;
+        font-size: 16px;
+        line-height: 1.25;
+      }
+
+      .panel-note {
+        color: var(--muted);
+        font-size: 12px;
+        margin-top: 4px;
+      }
+
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+        margin-bottom: 16px;
+      }
+
+      .metric {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 14px;
+        min-height: 78px;
+      }
+
+      .metric-label {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .metric-value {
+        margin-top: 7px;
+        font-size: 22px;
+        font-weight: 700;
+        line-height: 1.1;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        table-layout: fixed;
+      }
+
+      th,
+      td {
+        padding: 12px 14px;
+        text-align: left;
+        border-bottom: 1px solid var(--line);
+        vertical-align: top;
+        font-size: 13px;
+      }
+
+      th {
+        color: var(--muted);
+        font-weight: 600;
+        background: #fafbfd;
+      }
+
+      td {
+        overflow-wrap: anywhere;
+      }
+
+      .provider-cell {
+        font-weight: 650;
+      }
+
+      .muted {
+        color: var(--muted);
+      }
+
+      .progress-track {
+        height: 8px;
+        background: #eef2f6;
+        border-radius: 99px;
+        overflow: hidden;
+        margin-top: 7px;
+      }
+
+      .progress-bar {
+        height: 100%;
+        background: var(--green);
+        width: 0;
+      }
+
+      .progress-bar.warning {
+        background: #d18a00;
+      }
+
+      .progress-bar.critical {
+        background: var(--red);
+      }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        min-height: 24px;
+        border-radius: 999px;
+        padding: 2px 9px;
+        font-size: 12px;
+        font-weight: 650;
+        background: var(--soft-green);
+        color: var(--green);
+        white-space: nowrap;
+      }
+
+      .badge.exhausted,
+      .badge.critical {
+        background: var(--soft-red);
+        color: var(--red);
+      }
+
+      .badge.warning {
+        background: var(--soft-yellow);
+        color: var(--yellow);
+      }
+
+      .badge.notice {
+        background: var(--soft-blue);
+        color: var(--accent);
+      }
+
+      .side-stack {
+        display: grid;
+        gap: 16px;
+      }
+
+      .list {
+        padding: 12px 14px;
+        display: grid;
+        gap: 10px;
+      }
+
+      .list-item {
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 10px;
+        background: #fff;
+      }
+
+      .list-title {
+        font-size: 13px;
+        font-weight: 650;
+      }
+
+      .list-body {
+        margin-top: 4px;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      .decision-log {
+        max-height: 320px;
+        overflow: auto;
+      }
+
+      .empty {
+        padding: 18px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .toast {
+        min-height: 20px;
+        color: var(--muted);
+        font-size: 13px;
+        margin-top: 10px;
+      }
+
+      .toast.error {
+        color: var(--red);
+      }
+
+      @media (max-width: 980px) {
+        .grid {
+          grid-template-columns: 1fr;
+        }
+
+        .metrics {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+
+      @media (max-width: 640px) {
+        .app {
+          padding: 14px;
+        }
+
+        .toolbar {
+          align-items: stretch;
+          flex-direction: column;
+        }
+
+        .actions {
+          justify-content: flex-start;
+        }
+
+        .metrics {
+          grid-template-columns: 1fr;
+        }
+
+        th,
+        td {
+          padding: 10px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="app">
+      <div class="toolbar">
+        <div>
+          <h1>Provider 额度路由</h1>
+          <div class="subtle" id="windowLabel">加载中</div>
+        </div>
+        <div class="actions">
+          <input class="date-input" type="date" id="dateInput" />
+          <button class="button" id="refreshBtn" type="button">刷新</button>
+          <button class="button primary" id="exportBtn" type="button">导出 CSV</button>
+        </div>
+      </div>
+
+      <section class="metrics" id="metrics"></section>
+
+      <div class="grid">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2 class="panel-title">当前窗口用量</h2>
+              <div class="panel-note" id="modeLabel">-</div>
+            </div>
+            <span class="badge" id="dryRunBadge">-</span>
+          </div>
+          <div style="overflow-x: auto">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width: 22%">Provider</th>
+                  <th style="width: 18%">Model</th>
+                  <th style="width: 20%">Quota Key</th>
+                  <th style="width: 22%">Usage</th>
+                  <th style="width: 10%">Status</th>
+                  <th style="width: 8%">Pending</th>
+                </tr>
+              </thead>
+              <tbody id="usageBody"></tbody>
+            </table>
+          </div>
+          <div class="empty" id="usageEmpty" hidden>没有配置路由链。</div>
+        </section>
+
+        <aside class="side-stack">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2 class="panel-title">告警</h2>
+                <div class="panel-note">80% / 90% / 95% 和耗尽状态</div>
+              </div>
+            </div>
+            <div class="list" id="alertsList"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2 class="panel-title">运行状态</h2>
+                <div class="panel-note">预占与短期 overlay</div>
+              </div>
+            </div>
+            <div class="list" id="runtimeList"></div>
+          </section>
+        </aside>
+      </div>
+
+      <section class="panel" style="margin-top: 16px">
+        <div class="panel-header">
+          <div>
+            <h2 class="panel-title">最近路由决策</h2>
+            <div class="panel-note">来自 route_decisions.jsonl</div>
+          </div>
+        </div>
+        <div class="decision-log">
+          <table>
+            <thead>
+              <tr>
+                <th style="width: 18%">Time</th>
+                <th style="width: 10%">Action</th>
+                <th style="width: 18%">Original</th>
+                <th style="width: 18%">Selected</th>
+                <th style="width: 16%">Quota Key</th>
+                <th style="width: 20%">Reason</th>
+              </tr>
+            </thead>
+            <tbody id="decisionBody"></tbody>
+          </table>
+        </div>
+        <div class="empty" id="decisionEmpty" hidden>暂无路由决策。</div>
+      </section>
+
+      <div class="toast" id="toast"></div>
+    </main>
+
+    <script>
+      const api = window.AstrBotPluginPage;
+      const els = {
+        windowLabel: document.getElementById("windowLabel"),
+        modeLabel: document.getElementById("modeLabel"),
+        dryRunBadge: document.getElementById("dryRunBadge"),
+        metrics: document.getElementById("metrics"),
+        usageBody: document.getElementById("usageBody"),
+        usageEmpty: document.getElementById("usageEmpty"),
+        alertsList: document.getElementById("alertsList"),
+        runtimeList: document.getElementById("runtimeList"),
+        decisionBody: document.getElementById("decisionBody"),
+        decisionEmpty: document.getElementById("decisionEmpty"),
+        dateInput: document.getElementById("dateInput"),
+        refreshBtn: document.getElementById("refreshBtn"),
+        exportBtn: document.getElementById("exportBtn"),
+        toast: document.getElementById("toast"),
+      };
+
+      let state = { payload: null };
+
+      function formatTokens(value) {
+        const n = Number(value || 0);
+        if (n >= 1000000) return `${(n / 1000000).toFixed(2)}M`;
+        if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
+        return String(n);
+      }
+
+      function formatDateTime(value) {
+        if (!value) return "-";
+        const d = new Date(value);
+        if (Number.isNaN(d.getTime())) return value;
+        return d.toLocaleString("zh-CN", { hour12: false });
+      }
+
+      function setBusy(isBusy) {
+        els.refreshBtn.disabled = isBusy;
+        els.exportBtn.disabled = isBusy;
+      }
+
+      function setToast(message, isError = false) {
+        els.toast.textContent = message || "";
+        els.toast.classList.toggle("error", Boolean(isError));
+      }
+
+      function selectedDateParams() {
+        const value = els.dateInput.value;
+        return value ? { date: value } : {};
+      }
+
+      async function loadStatus() {
+        setBusy(true);
+        setToast("加载中...");
+        try {
+          const payload = await api.apiGet("status", selectedDateParams());
+          state.payload = payload;
+          render(payload);
+          setToast("已刷新");
+        } catch (err) {
+          console.error(err);
+          setToast(`加载失败：${err.message || err}`, true);
+        } finally {
+          setBusy(false);
+        }
+      }
+
+      function render(payload) {
+        renderHeader(payload);
+        renderMetrics(payload.summary || {});
+        renderRows(payload.rows || []);
+        renderAlerts(payload.alerts || []);
+        renderRuntime(payload.state || {});
+        renderDecisions(payload.decisions || []);
+      }
+
+      function renderHeader(payload) {
+        const settings = payload.settings || {};
+        const windowInfo = payload.window || {};
+        els.windowLabel.textContent =
+          `${formatDateTime(windowInfo.start_local)} -> ${formatDateTime(windowInfo.end_local)}`;
+        els.modeLabel.textContent =
+          `quota_key_mode=${settings.quota_key_mode || "-"} · action=${settings.exhausted_action || "-"} · reset=${settings.reset_time || "-"}`;
+        els.dryRunBadge.textContent = settings.dry_run ? "dry-run" : "active";
+        els.dryRunBadge.className = settings.dry_run ? "badge warning" : "badge";
+      }
+
+      function renderMetrics(summary) {
+        const items = [
+          ["Provider", summary.provider_count || 0],
+          ["Available", summary.available_count || 0],
+          ["Exhausted", summary.exhausted_count || 0],
+          ["Alerts", summary.alert_count || 0],
+        ];
+        els.metrics.innerHTML = items
+          .map(
+            ([label, value]) => `
+              <div class="metric">
+                <div class="metric-label">${escapeHtml(label)}</div>
+                <div class="metric-value">${escapeHtml(String(value))}</div>
+              </div>
+            `,
+          )
+          .join("");
+      }
+
+      function renderRows(rows) {
+        els.usageEmpty.hidden = rows.length > 0;
+        els.usageBody.innerHTML = rows
+          .map((row) => {
+            const limit = Number(row.limit || 0);
+            const used = Number(row.effective_tokens || 0);
+            const percent = limit > 0 ? Math.min(100, (used / limit) * 100) : 100;
+            const severity =
+              percent >= 100 ? "critical" : percent >= 90 ? "warning" : "";
+            const statusClass = row.status === "exhausted" ? "badge exhausted" : "badge";
+            return `
+              <tr>
+                <td class="provider-cell">${escapeHtml(row.provider_id || "-")}<div class="muted">${escapeHtml(row.chain || "-")}</div></td>
+                <td>${escapeHtml(row.provider_model || "-")}</td>
+                <td>${escapeHtml(row.quota_key || "-")}</td>
+                <td>
+                  <div>${formatTokens(used)} / ${formatTokens(limit)}</div>
+                  <div class="muted">db=${formatTokens(row.db_tokens)} overlay=${formatTokens(row.overlay_tokens)}</div>
+                  <div class="progress-track"><div class="progress-bar ${severity}" style="width:${percent}%"></div></div>
+                </td>
+                <td><span class="${statusClass}">${escapeHtml(row.status || "-")}</span></td>
+                <td>${formatTokens(row.pending_tokens)}</td>
+              </tr>
+            `;
+          })
+          .join("");
+      }
+
+      function renderAlerts(alerts) {
+        if (!alerts.length) {
+          els.alertsList.innerHTML = `<div class="empty">当前没有告警。</div>`;
+          return;
+        }
+        els.alertsList.innerHTML = alerts
+          .map(
+            (alert) => `
+              <div class="list-item">
+                <span class="badge ${escapeHtml(alert.level || "notice")}">${escapeHtml(alert.level || "notice")}</span>
+                <div class="list-title">${escapeHtml(alert.type || "-")}</div>
+                <div class="list-body">${escapeHtml(alert.message || "")}</div>
+              </div>
+            `,
+          )
+          .join("");
+      }
+
+      function renderRuntime(runtime) {
+        const pending = runtime.pending || [];
+        const overlays = runtime.overlays || [];
+        const details = [
+          `pending: ${runtime.pending_count || 0}`,
+          `overlay: ${runtime.overlay_count || 0}`,
+        ];
+        if (pending[0]) {
+          details.push(`first pending: ${pending[0].provider_id || "-"} ${formatTokens(pending[0].tokens)}`);
+        }
+        if (overlays[0]) {
+          details.push(`last overlay: ${overlays[0].provider_id || "-"} ${formatTokens(overlays[0].tokens)}`);
+        }
+        els.runtimeList.innerHTML = `
+          <div class="list-item">
+            <div class="list-title">State cache</div>
+            <div class="list-body">${details.map(escapeHtml).join("<br />")}</div>
+          </div>
+        `;
+      }
+
+      function renderDecisions(decisions) {
+        els.decisionEmpty.hidden = decisions.length > 0;
+        els.decisionBody.innerHTML = decisions
+          .map(
+            (item) => `
+              <tr>
+                <td>${escapeHtml(formatDateTime(item.time))}</td>
+                <td><span class="badge notice">${escapeHtml(item.action || "-")}</span></td>
+                <td>${escapeHtml(item.original_provider_id || "-")}</td>
+                <td>${escapeHtml(item.selected_provider_id || "-")}</td>
+                <td>${escapeHtml(item.selected_quota_key || "-")}</td>
+                <td>${escapeHtml(item.reason || "-")}</td>
+              </tr>
+            `,
+          )
+          .join("");
+      }
+
+      async function exportCsv() {
+        setBusy(true);
+        setToast("导出中...");
+        try {
+          const payload = await api.apiGet("export", selectedDateParams());
+          const blob = new Blob([payload.content || ""], {
+            type: payload.content_type || "text/csv;charset=utf-8",
+          });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = payload.filename || "provider_quota.csv";
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(url);
+          setToast("已导出");
+        } catch (err) {
+          console.error(err);
+          setToast(`导出失败：${err.message || err}`, true);
+        } finally {
+          setBusy(false);
+        }
+      }
+
+      function escapeHtml(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
+      async function init() {
+        await api.ready();
+        els.refreshBtn.addEventListener("click", loadStatus);
+        els.exportBtn.addEventListener("click", exportCsv);
+        await loadStatus();
+      }
+
+      init().catch((err) => {
+        console.error(err);
+        setToast(`初始化失败：${err.message || err}`, true);
+      });
+    </script>
+  </body>
+</html>

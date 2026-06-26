@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import time
+from datetime import date
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+
+from quart import request
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -18,13 +21,20 @@ from astrbot.core.star.filter.command import GreedyStr
 
 from .core.config import ChainConfig, RouterSettings
 from .core.ledger import QuotaLedger
+from .core.reports import (
+    build_alerts,
+    build_summary,
+    export_usage_csv,
+    read_recent_decisions,
+    write_snapshot,
+)
 from .core.router import ProviderQuotaRouter, decision_payload
 from .core.state import QuotaStateStore
-from .core.time_window import current_window
+from .core.time_window import current_window, window_for_local_date
 
 
 PLUGIN_NAME = "astrbot_plugin_provider_quota_router"
-PLUGIN_VERSION = "0.1.0"
+PLUGIN_VERSION = "0.2.0"
 PLUGIN_REPOSITORY = "https://github.com/yuuiwa1551/astrbot_plugin_provider_quota_router"
 PLUGIN_DESCRIPTION = "按 provider/model 每日 token 额度自动降级路由 AstrBot 聊天模型。"
 HOOK_PRIORITY = 900
@@ -74,12 +84,39 @@ class ProviderQuotaRouterPlugin(Star):
             count_cached_input_tokens=self.settings.count_cached_input_tokens,
         )
         self.router = self._build_router()
+        self._register_web_apis()
         logger.info(
             "[ProviderQuotaRouter] loaded: enabled=%s chains=%d quota_key_mode=%s dry_run=%s",
             self.settings.enabled,
             len(self.settings.chains),
             self.settings.quota_key_mode,
             self.settings.dry_run,
+        )
+
+    def _register_web_apis(self) -> None:
+        self.context.register_web_api(
+            f"/{PLUGIN_NAME}/status",
+            self.api_get_status,
+            ["GET"],
+            "获取 provider/model 额度路由状态",
+        )
+        self.context.register_web_api(
+            f"/{PLUGIN_NAME}/chains",
+            self.api_get_chains,
+            ["GET"],
+            "获取 provider/model 额度路由链",
+        )
+        self.context.register_web_api(
+            f"/{PLUGIN_NAME}/decisions",
+            self.api_get_decisions,
+            ["GET"],
+            "获取 provider/model 额度路由决策日志",
+        )
+        self.context.register_web_api(
+            f"/{PLUGIN_NAME}/export",
+            self.api_get_export,
+            ["GET"],
+            "导出 provider/model 额度用量 CSV",
         )
 
     def _resolve_data_dir(self) -> Path:
@@ -289,18 +326,75 @@ class ProviderQuotaRouterPlugin(Star):
             "用法：/quota status | /quota reload | /quota reset-cache | /quota dry-run on|off"
         )
 
+    async def api_get_status(self) -> dict:
+        try:
+            window = self._request_window()
+            payload = await self._status_payload(window)
+            if request.args.get("snapshot", "1") != "0":
+                snapshot_path = write_snapshot(self.data_dir, window, payload)
+                payload["snapshot_path"] = str(snapshot_path)
+            return _ok(payload)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[ProviderQuotaRouter] status API failed: %s", exc, exc_info=True)
+            return _error(f"获取状态失败: {exc}")
+
+    async def api_get_chains(self) -> dict:
+        try:
+            return _ok(
+                {
+                    "settings": self._settings_payload(),
+                    "chains": self._chains_payload(),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[ProviderQuotaRouter] chains API failed: %s", exc, exc_info=True)
+            return _error(f"获取链路失败: {exc}")
+
+    async def api_get_decisions(self) -> dict:
+        try:
+            limit = int(request.args.get("limit", 50) or 50)
+        except ValueError:
+            limit = 50
+        return _ok(
+            {
+                "decisions": read_recent_decisions(
+                    self.state.decisions_path,
+                    limit=limit,
+                )
+            }
+        )
+
+    async def api_get_export(self) -> dict:
+        try:
+            window = self._request_window()
+            rows = await self.router.status(window=window)
+            content = export_usage_csv(rows, window)
+            filename = f"provider_quota_{window.start_local:%Y%m%d}.csv"
+            return _ok(
+                {
+                    "filename": filename,
+                    "content_type": "text/csv; charset=utf-8",
+                    "content": content,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[ProviderQuotaRouter] export API failed: %s", exc, exc_info=True)
+            return _error(f"导出失败: {exc}")
+
     async def _status_text(self) -> str:
         window = current_window(
             timezone_name=self.settings.timezone,
             reset_time=self.settings.reset_time,
         )
-        rows = await self.router.status(window=window)
+        payload = await self._status_payload(window)
+        rows = payload["rows"]
         if not rows:
             return "Provider quota router 未配置任何链路。"
         lines = [
             "Provider quota router",
             f"window: {window.start_local:%Y-%m-%d %H:%M} -> {window.end_local:%Y-%m-%d %H:%M}",
             f"mode: {self.settings.quota_key_mode}, dry_run: {self.settings.dry_run}",
+            f"alerts: {payload['summary']['alert_count']} critical={payload['summary']['critical_alert_count']}",
         ]
         for row in rows:
             lines.append(
@@ -315,6 +409,74 @@ class ProviderQuotaRouterPlugin(Star):
                 )
             )
         return "\n".join(lines)
+
+    async def _status_payload(self, window) -> dict[str, Any]:
+        rows = await self.router.status(window=window)
+        alerts = build_alerts(rows)
+        state = await self.state.snapshot()
+        return {
+            "settings": self._settings_payload(),
+            "window": {
+                "id": window.window_id,
+                "start_local": window.start_local.isoformat(),
+                "end_local": window.end_local.isoformat(),
+                "start_utc": window.start_utc.isoformat(),
+                "end_utc": window.end_utc.isoformat(),
+            },
+            "summary": build_summary(rows, alerts),
+            "rows": rows,
+            "alerts": alerts,
+            "state": {
+                "pending_count": len(state.get("pending", {}) or {}),
+                "overlay_count": len(state.get("overlays", []) or []),
+                "pending": list((state.get("pending", {}) or {}).values()),
+                "overlays": state.get("overlays", []) or [],
+            },
+            "decisions": read_recent_decisions(self.state.decisions_path, limit=30),
+        }
+
+    def _settings_payload(self) -> dict[str, Any]:
+        return {
+            "enabled": self.settings.enabled,
+            "timezone": self.settings.timezone,
+            "reset_time": self.settings.reset_time,
+            "default_daily_limit_tokens": self.settings.default_daily_limit_tokens,
+            "default_safety_buffer_tokens": self.settings.default_safety_buffer_tokens,
+            "default_request_reservation_tokens": self.settings.default_request_reservation_tokens,
+            "reservation_ttl_seconds": self.settings.reservation_ttl_seconds,
+            "overlay_ttl_seconds": self.settings.overlay_ttl_seconds,
+            "count_cached_input_tokens": self.settings.count_cached_input_tokens,
+            "quota_key_mode": self.settings.quota_key_mode,
+            "exhausted_action": self.settings.exhausted_action,
+            "dry_run": self.settings.dry_run,
+            "use_astrbot_fallback_chain": self.settings.use_astrbot_fallback_chain,
+            "allow_status_for_all": self.settings.allow_status_for_all,
+        }
+
+    def _chains_payload(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": chain.name,
+                "providers": chain.providers,
+                "daily_limit_tokens": chain.limit(self.settings.default_daily_limit_tokens),
+                "safety_buffer_tokens": chain.safety_buffer(self.settings.default_safety_buffer_tokens),
+                "request_reservation_tokens": chain.reservation(self.settings.default_request_reservation_tokens),
+            }
+            for chain in self.settings.chains
+        ]
+
+    def _request_window(self):
+        date_arg = str(request.args.get("date", "") or "").strip()
+        if date_arg:
+            return window_for_local_date(
+                timezone_name=self.settings.timezone,
+                reset_time=self.settings.reset_time,
+                local_date=date.fromisoformat(date_arg),
+            )
+        return current_window(
+            timezone_name=self.settings.timezone,
+            reset_time=self.settings.reset_time,
+        )
 
     def _current_provider_id(self, event: AstrMessageEvent) -> str:
         selected = event.get_extra("selected_provider")
@@ -377,3 +539,14 @@ def _format_tokens(value: int) -> str:
     if value >= 1_000:
         return f"{value / 1_000:.1f}K"
     return str(value)
+
+
+def _ok(data: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = {"ok": True}
+    if data:
+        payload.update(data)
+    return payload
+
+
+def _error(message: str) -> dict[str, Any]:
+    return {"ok": False, "message": message}

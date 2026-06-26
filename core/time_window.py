@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 
@@ -51,5 +51,24 @@ def current_window(
         end_local=end_local,
         start_utc=start_utc,
         end_utc=end_utc,
+        window_id=start_local.strftime("%Y%m%dT%H%M%S%z"),
+    )
+
+
+def window_for_local_date(
+    *,
+    timezone_name: str,
+    reset_time: str,
+    local_date: date,
+) -> UsageWindow:
+    tz = ZoneInfo(str(timezone_name or "Asia/Shanghai"))
+    reset = parse_reset_time(reset_time)
+    start_local = datetime.combine(local_date, reset, tzinfo=tz)
+    end_local = start_local + timedelta(days=1)
+    return UsageWindow(
+        start_local=start_local,
+        end_local=end_local,
+        start_utc=start_local.astimezone(timezone.utc),
+        end_utc=end_local.astimezone(timezone.utc),
         window_id=start_local.strftime("%Y%m%dT%H%M%S%z"),
     )
