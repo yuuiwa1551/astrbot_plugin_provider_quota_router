@@ -306,12 +306,247 @@
         color: var(--red);
       }
 
+      .report-controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+      }
+
+      .select-input {
+        height: 34px;
+        min-width: 132px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        padding: 0 10px;
+        background: #fff;
+        color: var(--text);
+      }
+
+      .chart-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1.25fr) minmax(280px, 0.75fr);
+        gap: 14px;
+        padding: 16px;
+      }
+
+      .chart-card {
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: #fff;
+        padding: 14px;
+        min-width: 0;
+      }
+
+      .chart-card.wide {
+        grid-column: 1 / -1;
+      }
+
+      .chart-title {
+        margin: 0 0 10px;
+        font-size: 14px;
+        font-weight: 700;
+      }
+
+      .chart-note {
+        color: var(--muted);
+        font-size: 12px;
+        margin-top: 8px;
+      }
+
+      .history-summary {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+        margin-bottom: 14px;
+      }
+
+      .summary-chip {
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 10px 12px;
+        background: #fafbfd;
+      }
+
+      .summary-chip-label {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .summary-chip-value {
+        margin-top: 5px;
+        font-size: 18px;
+        font-weight: 700;
+      }
+
+      .legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 12px;
+        margin: 8px 0 12px;
+      }
+
+      .legend-item {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .legend-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        flex: 0 0 auto;
+      }
+
+      .stacked-chart {
+        display: grid;
+        gap: 9px;
+      }
+
+      .stacked-row {
+        display: grid;
+        grid-template-columns: 74px minmax(0, 1fr) 92px;
+        gap: 10px;
+        align-items: center;
+        font-size: 12px;
+      }
+
+      .stacked-date,
+      .stacked-value {
+        color: var(--muted);
+        white-space: nowrap;
+      }
+
+      .stacked-track {
+        height: 24px;
+        border-radius: 999px;
+        background: #eef2f6;
+        overflow: hidden;
+      }
+
+      .stacked-fill {
+        height: 100%;
+        display: flex;
+        border-radius: inherit;
+        overflow: hidden;
+        min-width: 2px;
+      }
+
+      .stacked-segment {
+        height: 100%;
+        min-width: 2px;
+      }
+
+      .pie-layout {
+        display: grid;
+        grid-template-columns: 150px minmax(0, 1fr);
+        gap: 14px;
+        align-items: center;
+      }
+
+      .pie-chart {
+        width: 150px;
+        height: 150px;
+        border-radius: 50%;
+        background: #eef2f6;
+        box-shadow: inset 0 0 0 1px var(--line);
+      }
+
+      .pie-center {
+        display: grid;
+        place-items: center;
+        width: 72px;
+        height: 72px;
+        border-radius: 50%;
+        background: #fff;
+        margin: 39px;
+        color: var(--text);
+        font-size: 13px;
+        font-weight: 700;
+        text-align: center;
+        white-space: pre-line;
+      }
+
+      .trend-chart {
+        min-height: 210px;
+        overflow-x: auto;
+      }
+
+      .trend-bars {
+        display: flex;
+        align-items: flex-end;
+        gap: 8px;
+        min-height: 188px;
+        padding: 10px 2px 0;
+      }
+
+      .trend-item {
+        display: grid;
+        grid-template-rows: 1fr auto;
+        gap: 6px;
+        min-width: 34px;
+        height: 188px;
+        align-items: end;
+      }
+
+      .trend-bar {
+        width: 100%;
+        border-radius: 7px 7px 2px 2px;
+        background: var(--accent);
+        min-height: 2px;
+        position: relative;
+      }
+
+      .trend-bar:hover::after {
+        content: attr(data-title);
+        position: absolute;
+        left: 50%;
+        bottom: calc(100% + 6px);
+        transform: translateX(-50%);
+        background: #18202f;
+        color: #fff;
+        border-radius: 6px;
+        padding: 5px 7px;
+        font-size: 12px;
+        white-space: nowrap;
+        z-index: 2;
+      }
+
+      .trend-label {
+        color: var(--muted);
+        font-size: 11px;
+        text-align: center;
+        transform: rotate(-30deg);
+        transform-origin: center top;
+        min-height: 24px;
+      }
+
+      .chart-empty {
+        color: var(--muted);
+        font-size: 13px;
+        padding: 24px;
+        text-align: center;
+        background: #fafbfd;
+        border-radius: 8px;
+      }
+
       @media (max-width: 980px) {
         .grid {
           grid-template-columns: 1fr;
         }
 
         .metrics {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .chart-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .history-summary {
           grid-template-columns: repeat(2, minmax(0, 1fr));
         }
       }
@@ -331,6 +566,22 @@
         }
 
         .metrics {
+          grid-template-columns: 1fr;
+        }
+
+        .history-summary {
+          grid-template-columns: 1fr;
+        }
+
+        .stacked-row {
+          grid-template-columns: 62px minmax(0, 1fr);
+        }
+
+        .stacked-value {
+          grid-column: 2;
+        }
+
+        .pie-layout {
           grid-template-columns: 1fr;
         }
 
@@ -356,6 +607,51 @@
       </div>
 
       <section class="metrics" id="metrics"></section>
+
+      <section class="panel" id="historyPanel">
+        <div class="panel-header">
+          <div>
+            <h2 class="panel-title">历史 token 用量报表</h2>
+            <div class="panel-note" id="historyWindowLabel">按 AstrBot provider_stats 统计，窗口与 quota reset 保持一致。</div>
+          </div>
+          <div class="report-controls">
+            <select class="select-input" id="historyDaysSelect" title="统计范围">
+              <option value="7">近 7 天</option>
+              <option value="14" selected>近 14 天</option>
+              <option value="30">近 30 天</option>
+              <option value="60">近 60 天</option>
+              <option value="90">近 90 天</option>
+            </select>
+            <select class="select-input" id="historyModelSelect" title="单模型趋势"></select>
+            <select class="select-input" id="historyPieDateSelect" title="饼图日期"></select>
+            <button class="button" id="historyRefreshBtn" type="button">刷新报表</button>
+          </div>
+        </div>
+        <div class="chart-grid">
+          <div class="chart-card wide">
+            <div class="history-summary" id="historySummary"></div>
+            <h3 class="chart-title">每天每个模型消耗</h3>
+            <div class="legend" id="historyLegend"></div>
+            <div class="stacked-chart" id="dailyStackedChart"></div>
+            <div class="chart-note">横向堆叠条表示单日总量，颜色表示不同模型；长度会按当前范围内单日最大用量缩放。</div>
+          </div>
+
+          <div class="chart-card">
+            <h3 class="chart-title">单日模型占比</h3>
+            <div class="pie-layout">
+              <div class="pie-chart" id="modelPieChart">
+                <div class="pie-center" id="modelPieCenter">-</div>
+              </div>
+              <div class="legend" id="modelPieLegend"></div>
+            </div>
+          </div>
+
+          <div class="chart-card">
+            <h3 class="chart-title">某个模型每天消耗</h3>
+            <div class="trend-chart" id="modelTrendChart"></div>
+          </div>
+        </div>
+      </section>
 
       <div class="grid">
         <section class="panel">
@@ -444,6 +740,18 @@
         metrics: document.getElementById("metrics"),
         usageBody: document.getElementById("usageBody"),
         usageEmpty: document.getElementById("usageEmpty"),
+        historyWindowLabel: document.getElementById("historyWindowLabel"),
+        historyDaysSelect: document.getElementById("historyDaysSelect"),
+        historyModelSelect: document.getElementById("historyModelSelect"),
+        historyPieDateSelect: document.getElementById("historyPieDateSelect"),
+        historyRefreshBtn: document.getElementById("historyRefreshBtn"),
+        historySummary: document.getElementById("historySummary"),
+        historyLegend: document.getElementById("historyLegend"),
+        dailyStackedChart: document.getElementById("dailyStackedChart"),
+        modelPieChart: document.getElementById("modelPieChart"),
+        modelPieCenter: document.getElementById("modelPieCenter"),
+        modelPieLegend: document.getElementById("modelPieLegend"),
+        modelTrendChart: document.getElementById("modelTrendChart"),
         alertsList: document.getElementById("alertsList"),
         runtimeList: document.getElementById("runtimeList"),
         decisionBody: document.getElementById("decisionBody"),
@@ -473,6 +781,7 @@
       function setBusy(isBusy) {
         els.refreshBtn.disabled = isBusy;
         els.exportBtn.disabled = isBusy;
+        els.historyRefreshBtn.disabled = isBusy;
       }
 
       function setToast(message, isError = false) {
@@ -499,6 +808,29 @@
         } finally {
           setBusy(false);
         }
+      }
+
+      async function loadHistory() {
+        setBusy(true);
+        setToast("加载历史报表...");
+        try {
+          const payload = await api.apiGet("history", {
+            days: els.historyDaysSelect.value || "14",
+          });
+          renderHistory(payload);
+          setToast("历史报表已刷新");
+        } catch (err) {
+          console.error(err);
+          renderHistoryError(err.message || err);
+          setToast(`历史报表加载失败：${err.message || err}`, true);
+        } finally {
+          setBusy(false);
+        }
+      }
+
+      async function refreshAll() {
+        await loadStatus();
+        await loadHistory();
       }
 
       function render(payload) {
@@ -625,6 +957,221 @@
           .join("");
       }
 
+      const chartPalette = [
+        "#2563eb",
+        "#16a34a",
+        "#f59e0b",
+        "#dc2626",
+        "#7c3aed",
+        "#0891b2",
+        "#db2777",
+        "#4f46e5",
+        "#65a30d",
+        "#ea580c",
+        "#0f766e",
+        "#9333ea",
+      ];
+
+      function colorForIndex(index) {
+        return chartPalette[index % chartPalette.length];
+      }
+
+      function colorForModel(payload, modelName, fallbackIndex = 0) {
+        const index = (payload.series || []).findIndex(
+          (item) => item.provider_model === modelName,
+        );
+        return colorForIndex(index >= 0 ? index : fallbackIndex);
+      }
+
+      function shortDay(value) {
+        return String(value || "").slice(5) || "-";
+      }
+
+      function renderHistory(payload) {
+        state.history = payload || {};
+        const days = payload.days || [];
+        const series = payload.series || [];
+        const previousModel = els.historyModelSelect.value;
+        const previousPieDate = els.historyPieDateSelect.value;
+        const modelOptions = series
+          .map(
+            (item) =>
+              `<option value="${escapeHtml(item.provider_model)}">${escapeHtml(item.provider_model)}</option>`,
+          )
+          .join("");
+        els.historyModelSelect.innerHTML =
+          modelOptions || `<option value="">暂无模型</option>`;
+        if (previousModel && series.some((item) => item.provider_model === previousModel)) {
+          els.historyModelSelect.value = previousModel;
+        }
+
+        const dayOptions = [...days]
+          .reverse()
+          .map((day) => `<option value="${escapeHtml(day)}">${escapeHtml(day)}</option>`)
+          .join("");
+        els.historyPieDateSelect.innerHTML =
+          dayOptions || `<option value="">暂无日期</option>`;
+        if (previousPieDate && days.includes(previousPieDate)) {
+          els.historyPieDateSelect.value = previousPieDate;
+        }
+
+        els.historyWindowLabel.textContent = `${payload.start_date || "-"} -> ${payload.end_date || "-"} · reset=${payload.reset_time || "-"} · cached=${payload.count_cached_input_tokens ? "included" : "excluded"}`;
+        renderHistorySummary(payload.summary || {});
+        renderHistoryLegend(series);
+        updateHistoryCharts();
+      }
+
+      function renderHistoryError(message) {
+        els.historySummary.innerHTML = "";
+        els.historyLegend.innerHTML = "";
+        els.dailyStackedChart.innerHTML = `<div class="chart-empty">${escapeHtml(message || "历史报表加载失败")}</div>`;
+        els.modelPieCenter.textContent = "-";
+        els.modelPieChart.style.background = "#eef2f6";
+        els.modelPieLegend.innerHTML = "";
+        els.modelTrendChart.innerHTML = `<div class="chart-empty">${escapeHtml(message || "历史报表加载失败")}</div>`;
+      }
+
+      function renderHistorySummary(summary) {
+        const items = [
+          ["Range tokens", formatTokens(summary.total_tokens || 0)],
+          ["Calls", summary.total_calls || 0],
+          ["Models", summary.model_count || 0],
+          ["Days", summary.day_count || 0],
+        ];
+        els.historySummary.innerHTML = items
+          .map(
+            ([label, value]) => `
+              <div class="summary-chip">
+                <div class="summary-chip-label">${escapeHtml(label)}</div>
+                <div class="summary-chip-value">${escapeHtml(String(value))}</div>
+              </div>
+            `,
+          )
+          .join("");
+      }
+
+      function renderHistoryLegend(series) {
+        els.historyLegend.innerHTML = (series || [])
+          .map(
+            (item, index) => `
+              <span class="legend-item" title="${escapeHtml(item.provider_model)}">
+                <span class="legend-dot" style="background:${colorForIndex(index)}"></span>
+                ${escapeHtml(item.provider_model)} · ${formatTokens(item.total_tokens)}
+              </span>
+            `,
+          )
+          .join("");
+      }
+
+      function updateHistoryCharts() {
+        const payload = state.history || {};
+        renderDailyStackedChart(payload);
+        renderPieChart(payload, els.historyPieDateSelect.value);
+        renderModelTrend(payload, els.historyModelSelect.value);
+      }
+
+      function renderDailyStackedChart(payload) {
+        const days = payload.days || [];
+        const series = payload.series || [];
+        const dailyTotals = new Map(
+          (payload.daily_totals || []).map((item) => [item.date, Number(item.tokens || 0)]),
+        );
+        const maxDaily = Math.max(0, ...Array.from(dailyTotals.values()));
+        if (!days.length || !series.length || maxDaily <= 0) {
+          els.dailyStackedChart.innerHTML = `<div class="chart-empty">当前范围没有 provider token 记录。</div>`;
+          return;
+        }
+        els.dailyStackedChart.innerHTML = days
+          .map((day, dayIndex) => {
+            const total = dailyTotals.get(day) || 0;
+            const fillWidth = Math.max(2, (total / maxDaily) * 100);
+            const segments = series
+              .map((item, modelIndex) => {
+                const tokens = Number((item.tokens || [])[dayIndex] || 0);
+                if (tokens <= 0 || total <= 0) return "";
+                const width = Math.max(1, (tokens / total) * 100);
+                return `<span class="stacked-segment" title="${escapeHtml(item.provider_model)} ${formatTokens(tokens)}" style="width:${width}%;background:${colorForIndex(modelIndex)}"></span>`;
+              })
+              .join("");
+            return `
+              <div class="stacked-row">
+                <div class="stacked-date">${escapeHtml(shortDay(day))}</div>
+                <div class="stacked-track">
+                  <div class="stacked-fill" style="width:${fillWidth}%">${segments}</div>
+                </div>
+                <div class="stacked-value">${formatTokens(total)}</div>
+              </div>
+            `;
+          })
+          .join("");
+      }
+
+      function renderPieChart(payload, day) {
+        const rows = (payload.daily_rows || [])
+          .filter((item) => item.date === day && Number(item.tokens || 0) > 0)
+          .sort((a, b) => Number(b.tokens || 0) - Number(a.tokens || 0));
+        const total = rows.reduce((sum, item) => sum + Number(item.tokens || 0), 0);
+        if (!day || !rows.length || total <= 0) {
+          els.modelPieCenter.textContent = "-";
+          els.modelPieChart.style.background = "#eef2f6";
+          els.modelPieLegend.innerHTML = `<div class="chart-empty">该日没有 token 记录。</div>`;
+          return;
+        }
+        let cursor = 0;
+        const gradients = rows.map((item, index) => {
+          const start = cursor;
+          cursor += (Number(item.tokens || 0) / total) * 360;
+          return `${colorForModel(payload, item.provider_model, index)} ${start.toFixed(2)}deg ${cursor.toFixed(2)}deg`;
+        });
+        els.modelPieChart.style.background = `conic-gradient(${gradients.join(",")})`;
+        els.modelPieCenter.textContent = `${shortDay(day)}\n${formatTokens(total)}`;
+        els.modelPieLegend.innerHTML = rows
+          .map((item, index) => {
+            const percent = ((Number(item.tokens || 0) / total) * 100).toFixed(1);
+            return `
+              <span class="legend-item" title="${escapeHtml(item.provider_model)}">
+                <span class="legend-dot" style="background:${colorForModel(payload, item.provider_model, index)}"></span>
+                ${escapeHtml(item.provider_model)} · ${percent}% · ${formatTokens(item.tokens)}
+              </span>
+            `;
+          })
+          .join("");
+      }
+
+      function renderModelTrend(payload, modelName) {
+        const days = payload.days || [];
+        const series = (payload.series || []).find(
+          (item) => item.provider_model === modelName,
+        );
+        if (!days.length || !series) {
+          els.modelTrendChart.innerHTML = `<div class="chart-empty">请选择一个模型查看每日趋势。</div>`;
+          return;
+        }
+        const tokens = series.tokens || [];
+        const maxValue = Math.max(0, ...tokens.map((item) => Number(item || 0)));
+        if (maxValue <= 0) {
+          els.modelTrendChart.innerHTML = `<div class="chart-empty">该模型在当前范围没有 token 记录。</div>`;
+          return;
+        }
+        els.modelTrendChart.innerHTML = `
+          <div class="trend-bars">
+            ${days
+              .map((day, index) => {
+                const value = Number(tokens[index] || 0);
+                const height = Math.max(2, (value / maxValue) * 150);
+                return `
+                  <div class="trend-item">
+                    <div class="trend-bar" data-title="${escapeHtml(day)} ${formatTokens(value)}" style="height:${height}px;background:${colorForIndex((payload.series || []).indexOf(series))}"></div>
+                    <div class="trend-label">${escapeHtml(shortDay(day))}</div>
+                  </div>
+                `;
+              })
+              .join("")}
+          </div>
+          <div class="chart-note">${escapeHtml(modelName)} · range total ${formatTokens(series.total_tokens || 0)}</div>
+        `;
+      }
+
       async function exportCsv() {
         setBusy(true);
         setToast("导出中...");
@@ -661,9 +1208,13 @@
 
       async function init() {
         await api.ready();
-        els.refreshBtn.addEventListener("click", loadStatus);
+        els.refreshBtn.addEventListener("click", refreshAll);
         els.exportBtn.addEventListener("click", exportCsv);
-        await loadStatus();
+        els.historyRefreshBtn.addEventListener("click", loadHistory);
+        els.historyDaysSelect.addEventListener("change", loadHistory);
+        els.historyModelSelect.addEventListener("change", updateHistoryCharts);
+        els.historyPieDateSelect.addEventListener("change", updateHistoryCharts);
+        await refreshAll();
       }
 
       init().catch((err) => {

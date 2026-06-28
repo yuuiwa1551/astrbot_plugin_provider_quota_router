@@ -82,7 +82,9 @@
 - 已实现 `GET /status`、`GET /chains`、`GET /decisions`、`GET /export` Web API。
 - 已实现每日 snapshot，写入 `data/plugin_data/astrbot_plugin_provider_quota_router/daily_snapshots/`。
 - 已实现 CSV 导出，支持当前窗口或 `date=YYYY-MM-DD`。
-- 已将插件版本更新为 `0.2.0`。
+- 已实现历史 token 图表：每日模型堆叠柱状图、单日模型占比饼图、单模型趋势图。
+- 已实现 `GET /history` Web API，支持 `days` 或 `start_date/end_date`。
+- 已将插件版本更新为 `0.3.0`。
 
 ## 暂不处理
 

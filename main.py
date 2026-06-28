@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from datetime import date
+from datetime import date, timedelta
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -34,7 +34,7 @@ from .core.time_window import current_window, window_for_local_date
 
 
 PLUGIN_NAME = "astrbot_plugin_provider_quota_router"
-PLUGIN_VERSION = "0.2.0"
+PLUGIN_VERSION = "0.3.0"
 PLUGIN_REPOSITORY = "https://github.com/yuuiwa1551/astrbot_plugin_provider_quota_router"
 PLUGIN_DESCRIPTION = "按 provider/model 每日 token 额度自动降级路由 AstrBot 聊天模型。"
 HOOK_PRIORITY = 900
@@ -117,6 +117,12 @@ class ProviderQuotaRouterPlugin(Star):
             self.api_get_export,
             ["GET"],
             "导出 provider/model 额度用量 CSV",
+        )
+        self.context.register_web_api(
+            f"/{PLUGIN_NAME}/history",
+            self.api_get_history,
+            ["GET"],
+            "获取 provider/model 历史日用量统计",
         )
 
     def _resolve_data_dir(self) -> Path:
@@ -381,6 +387,24 @@ class ProviderQuotaRouterPlugin(Star):
             logger.error("[ProviderQuotaRouter] export API failed: %s", exc, exc_info=True)
             return _error(f"导出失败: {exc}")
 
+    async def api_get_history(self) -> dict:
+        try:
+            start_date, end_date = self._request_history_range()
+            model = str(request.args.get("model", "") or "").strip()
+            payload = await self.ledger.query_daily_model_usage(
+                start_date=start_date,
+                end_date=end_date,
+                timezone_name=self.settings.timezone,
+                reset_time=self.settings.reset_time,
+                model_filter=model,
+            )
+            payload["settings"] = self._settings_payload()
+            payload["model_filter"] = model
+            return _ok(payload)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[ProviderQuotaRouter] history API failed: %s", exc, exc_info=True)
+            return _error(f"获取历史统计失败: {exc}")
+
     async def _status_text(self) -> str:
         window = current_window(
             timezone_name=self.settings.timezone,
@@ -477,6 +501,32 @@ class ProviderQuotaRouterPlugin(Star):
             timezone_name=self.settings.timezone,
             reset_time=self.settings.reset_time,
         )
+
+    def _request_history_range(self) -> tuple[date, date]:
+        today = current_window(
+            timezone_name=self.settings.timezone,
+            reset_time=self.settings.reset_time,
+        ).start_local.date()
+        end_arg = str(request.args.get("end_date", "") or "").strip()
+        start_arg = str(request.args.get("start_date", "") or "").strip()
+        days_arg = str(request.args.get("days", "") or "").strip()
+
+        end_date = date.fromisoformat(end_arg) if end_arg else today
+        if start_arg:
+            start_date = date.fromisoformat(start_arg)
+        else:
+            try:
+                days = int(days_arg or 14)
+            except ValueError:
+                days = 14
+            days = max(1, min(days, 90))
+            start_date = end_date - timedelta(days=days - 1)
+
+        if end_date < start_date:
+            start_date, end_date = end_date, start_date
+        if (end_date - start_date).days > 89:
+            start_date = end_date - timedelta(days=89)
+        return start_date, end_date
 
     def _current_provider_id(self, event: AstrMessageEvent) -> str:
         selected = event.get_extra("selected_provider")

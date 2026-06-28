@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.3.0
+
+- 增加 `/history` Web API，按 AstrBot `provider_stats` 聚合历史日用量。
+- Plugin Page 增加每日模型堆叠柱状图、单日模型占比饼图、单模型趋势图。
+- 历史统计窗口与 `timezone + reset_time` 保持一致，token 口径遵循 `count_cached_input_tokens`。
+
 ## v0.2.0
 
 - 增加 AstrBot Plugin Page 状态面板。

@@ -4,10 +4,11 @@
 
 新建独立插件 `astrbot_plugin_provider_quota_router`，负责全局 provider/model 日额度路由。插件不修改 AstrBot 核心，不改 `cmd_config.json` 默认 provider，不合并到现有第三方 `astrbot_plugin_token_controller`。
 
-实施按两期推进：
+实施按三期推进：
 
 - 1期：命令行可管理的 MVP，先做到稳定路由和可验证统计。
 - 2期：Plugin Page、报表、告警和更细计费口径。
+- 3期：在 Plugin Page 增加历史 token 图表，覆盖每日模型消耗、单日占比和单模型趋势。
 
 ## 技术决策
 
@@ -53,7 +54,7 @@
 
 目标：降低日常运维成本，提供可视化和更强的费用风险控制。
 
-状态：v0.2.0 已实现。
+状态：v0.2.0 已实现，v0.3.0 已补充历史图表。
 
 交付：
 
@@ -70,6 +71,11 @@
   - provider usage unavailable。
 - 每个模型独立配置 quota key、额度、buffer、reset time。
 - dry-run 面板开关。
+- 历史 token 图表：
+  - 每天每个模型消耗堆叠柱状图。
+  - 单日模型占比饼图。
+  - 某个模型每天消耗趋势图。
+  - `GET /history` 按 `provider_stats` 聚合 1-90 天历史。
 
 验证：
 
