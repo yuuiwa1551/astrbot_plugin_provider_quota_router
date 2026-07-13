@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import time
-from datetime import date, timedelta
 from dataclasses import replace
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,19 @@ from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.star.filter.command import GreedyStr
 
 from .core.config import ChainConfig, RouterSettings
+from .core.core_fallback_guard import (
+    CORE_FALLBACK_DROPPED_EXTRA_KEY,
+    CORE_FALLBACK_GUARD_EXTRA_KEY,
+    install_core_fallback_guard,
+    uninstall_core_fallback_guard,
+)
+from .core.fallback_config import (
+    ConfigFileSignature,
+    build_astrbot_fallback_chain,
+    file_signature,
+    load_astrbot_fallback_chain,
+    resolve_cmd_config_path,
+)
 from .core.ledger import QuotaLedger
 from .core.reports import (
     build_alerts,
@@ -34,7 +48,7 @@ from .core.time_window import current_window, window_for_local_date
 
 
 PLUGIN_NAME = "astrbot_plugin_provider_quota_router"
-PLUGIN_VERSION = "0.3.0"
+PLUGIN_VERSION = "0.5.0"
 PLUGIN_REPOSITORY = "https://github.com/yuuiwa1551/astrbot_plugin_provider_quota_router"
 PLUGIN_DESCRIPTION = "按 provider/model 每日 token 额度自动降级路由 AstrBot 聊天模型。"
 HOOK_PRIORITY = 900
@@ -53,6 +67,9 @@ CONFIG_KEYS = {
     "exhausted_action",
     "dry_run",
     "use_astrbot_fallback_chain",
+    "fallback_watch_interval_seconds",
+    "strict_priority_order",
+    "disable_astrbot_error_fallback",
     "allow_status_for_all",
     "admin_user_ids",
     "exhausted_message",
@@ -76,6 +93,15 @@ class ProviderQuotaRouterPlugin(Star):
     ) -> None:
         super().__init__(context)
         self.config = config or {}
+        self._cmd_config_path = resolve_cmd_config_path(__file__)
+        self._fallback_config_signature: ConfigFileSignature | None = None
+        self._fallback_watch_task: asyncio.Task | None = None
+        self._fallback_chain_is_dynamic = False
+        self._fallback_chain_source = "none"
+        self._fallback_last_reload_at: str | None = None
+        self._fallback_last_error: str | None = None
+        self._core_fallback_guard_owner = object()
+        self._core_fallback_guard_active = False
         self.settings = self._load_settings()
         self.data_dir = self._resolve_data_dir()
         self.state = QuotaStateStore(self.data_dir)
@@ -86,12 +112,74 @@ class ProviderQuotaRouterPlugin(Star):
         self.router = self._build_router()
         self._register_web_apis()
         logger.info(
-            "[ProviderQuotaRouter] loaded: enabled=%s chains=%d quota_key_mode=%s dry_run=%s",
+            "[ProviderQuotaRouter] loaded: enabled=%s chains=%d quota_key_mode=%s dry_run=%s fallback_source=%s",
             self.settings.enabled,
             len(self.settings.chains),
             self.settings.quota_key_mode,
             self.settings.dry_run,
+            self._fallback_chain_source,
         )
+
+    async def initialize(self) -> None:
+        self._sync_core_fallback_guard()
+        self._fallback_watch_task = asyncio.create_task(
+            self._watch_fallback_config(),
+            name="provider-quota-router-fallback-watch",
+        )
+        logger.info(
+            "[ProviderQuotaRouter] fallback watch started: active=%s path=%s interval=%ss",
+            self._fallback_chain_is_dynamic,
+            self._cmd_config_path,
+            self.settings.fallback_watch_interval_seconds,
+        )
+
+    async def terminate(self) -> None:
+        task = self._fallback_watch_task
+        self._fallback_watch_task = None
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self._disable_core_fallback_guard()
+        logger.info("[ProviderQuotaRouter] fallback watch stopped")
+
+    def _sync_core_fallback_guard(self) -> None:
+        should_enable = (
+            self.settings.enabled
+            and self.settings.disable_astrbot_error_fallback
+            and not self.settings.dry_run
+        )
+        if should_enable and not self._core_fallback_guard_active:
+            try:
+                self._core_fallback_guard_active = install_core_fallback_guard(
+                    self._core_fallback_guard_owner
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "[ProviderQuotaRouter] failed to install AstrBot core fallback guard: %s",
+                    exc,
+                )
+                self._core_fallback_guard_active = False
+            else:
+                logger.info(
+                    "[ProviderQuotaRouter] AstrBot core error fallback guard enabled"
+                )
+        elif not should_enable:
+            self._disable_core_fallback_guard()
+
+    def _disable_core_fallback_guard(self) -> None:
+        if not self._core_fallback_guard_active:
+            return
+        try:
+            uninstall_core_fallback_guard(self._core_fallback_guard_owner)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[ProviderQuotaRouter] failed to remove AstrBot core fallback guard: %s",
+                exc,
+            )
+        self._core_fallback_guard_active = False
 
     def _register_web_apis(self) -> None:
         self.context.register_web_api(
@@ -136,10 +224,23 @@ class ProviderQuotaRouterPlugin(Star):
     def _load_settings(self) -> RouterSettings:
         raw = self._config_to_dict(self.config)
         settings = RouterSettings.from_raw(raw)
-        if not settings.chains and settings.use_astrbot_fallback_chain:
-            chain = self._default_chain_from_astrbot()
+        self._fallback_chain_is_dynamic = (
+            not settings.chains and settings.use_astrbot_fallback_chain
+        )
+        if self._fallback_chain_is_dynamic:
+            chain = self._default_chain_from_cmd_config()
+            if chain is None:
+                chain = self._default_chain_from_astrbot()
+                if chain:
+                    self._fallback_chain_source = "provider_manager"
             if chain:
                 settings = replace(settings, chains=[chain])
+        elif settings.chains:
+            self._fallback_chain_source = "custom"
+            self._fallback_last_error = None
+        else:
+            self._fallback_chain_source = "none"
+            self._fallback_last_error = None
         return settings
 
     def _build_router(self) -> ProviderQuotaRouter:
@@ -157,6 +258,18 @@ class ProviderQuotaRouterPlugin(Star):
             count_cached_input_tokens=self.settings.count_cached_input_tokens,
         )
         self.router = self._build_router()
+
+    def _default_chain_from_cmd_config(self) -> ChainConfig | None:
+        try:
+            chain, signature = load_astrbot_fallback_chain(self._cmd_config_path)
+        except Exception as exc:  # noqa: BLE001
+            self._record_fallback_error(exc)
+            return None
+        self._fallback_config_signature = signature
+        self._fallback_chain_source = "cmd_config"
+        self._fallback_last_reload_at = datetime.now().astimezone().isoformat()
+        self._fallback_last_error = None
+        return chain
 
     @staticmethod
     def _config_to_dict(config: AstrBotConfig | dict | None) -> dict[str, Any]:
@@ -180,16 +293,61 @@ class ProviderQuotaRouterPlugin(Star):
     def _default_chain_from_astrbot(self) -> ChainConfig | None:
         manager = getattr(self.context, "provider_manager", None)
         provider_settings = getattr(manager, "provider_settings", {}) or {}
-        default_id = str(provider_settings.get("default_provider_id") or "").strip()
-        fallback_ids = provider_settings.get("fallback_chat_models") or []
-        providers: list[str] = []
-        for provider_id in [default_id, *fallback_ids]:
-            provider_id = str(provider_id or "").strip()
-            if provider_id and provider_id not in providers:
-                providers.append(provider_id)
-        if not providers:
+        try:
+            return build_astrbot_fallback_chain(provider_settings)
+        except Exception as exc:  # noqa: BLE001
+            self._record_fallback_error(exc)
             return None
-        return ChainConfig(name="astrbot-default", providers=providers)
+
+    async def _watch_fallback_config(self) -> None:
+        while True:
+            await asyncio.sleep(self.settings.fallback_watch_interval_seconds)
+            if not self._fallback_chain_is_dynamic:
+                continue
+            try:
+                signature = await asyncio.to_thread(
+                    file_signature, self._cmd_config_path
+                )
+                if signature == self._fallback_config_signature:
+                    continue
+                chain, loaded_signature = await asyncio.to_thread(
+                    load_astrbot_fallback_chain, self._cmd_config_path
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                self._record_fallback_error(exc)
+                continue
+            self._apply_watched_fallback_chain(chain, loaded_signature)
+
+    def _apply_watched_fallback_chain(
+        self,
+        chain: ChainConfig,
+        signature: ConfigFileSignature,
+    ) -> None:
+        old_providers = (
+            self.settings.chains[0].providers if self.settings.chains else []
+        )
+        self.settings = replace(self.settings, chains=[chain])
+        self.router = self._build_router()
+        self._fallback_config_signature = signature
+        self._fallback_chain_source = "cmd_config"
+        self._fallback_last_reload_at = datetime.now().astimezone().isoformat()
+        self._fallback_last_error = None
+        logger.info(
+            "[ProviderQuotaRouter] fallback chain hot-reloaded: old=%s new=%s",
+            old_providers,
+            chain.providers,
+        )
+
+    def _record_fallback_error(self, exc: Exception) -> None:
+        message = f"{type(exc).__name__}: {exc}"
+        if message != self._fallback_last_error:
+            logger.warning(
+                "[ProviderQuotaRouter] fallback config reload failed; keeping last valid chain: %s",
+                message,
+            )
+        self._fallback_last_error = message
 
     @filter.on_waiting_llm_request(priority=HOOK_PRIORITY)
     async def on_waiting_llm_request(self, event: AstrMessageEvent) -> None:
@@ -218,6 +376,8 @@ class ProviderQuotaRouterPlugin(Star):
         )
         if decision.action == "skip":
             return
+        if self._core_fallback_guard_active and not self.settings.dry_run:
+            event.set_extra(CORE_FALLBACK_GUARD_EXTRA_KEY, True)
         event.set_extra("provider_quota_router_request_id", request_id)
         event.set_extra("provider_quota_router_decision", decision.action)
         event.set_extra("provider_quota_router_reason", decision.reason)
@@ -272,6 +432,12 @@ class ProviderQuotaRouterPlugin(Star):
         run_context: Any,
         response: LLMResponse,
     ) -> None:
+        dropped_fallbacks = event.get_extra(CORE_FALLBACK_DROPPED_EXTRA_KEY)
+        if dropped_fallbacks:
+            logger.info(
+                "[ProviderQuotaRouter] blocked AstrBot error fallback candidates: %s",
+                dropped_fallbacks,
+            )
         request_id = str(event.get_extra("provider_quota_router_request_id") or "")
         if not request_id:
             return
@@ -308,8 +474,11 @@ class ProviderQuotaRouterPlugin(Star):
 
         if subcommand == "reload":
             self._reload_runtime_settings()
+            self._sync_core_fallback_guard()
             yield event.plain_result(
-                f"Provider quota router 已重载：chains={len(self.settings.chains)}, dry_run={self.settings.dry_run}"
+                "Provider quota router 已重载："
+                f"chains={len(self.settings.chains)}, dry_run={self.settings.dry_run}, "
+                f"fallback_source={self._fallback_chain_source}"
             )
             return
 
@@ -474,6 +643,15 @@ class ProviderQuotaRouterPlugin(Star):
             "exhausted_action": self.settings.exhausted_action,
             "dry_run": self.settings.dry_run,
             "use_astrbot_fallback_chain": self.settings.use_astrbot_fallback_chain,
+            "fallback_watch_interval_seconds": self.settings.fallback_watch_interval_seconds,
+            "strict_priority_order": self.settings.strict_priority_order,
+            "disable_astrbot_error_fallback": self.settings.disable_astrbot_error_fallback,
+            "core_fallback_guard_active": self._core_fallback_guard_active,
+            "fallback_watch_active": self._fallback_chain_is_dynamic,
+            "fallback_config_path": str(self._cmd_config_path),
+            "fallback_chain_source": self._fallback_chain_source,
+            "fallback_last_reload_at": self._fallback_last_reload_at,
+            "fallback_last_error": self._fallback_last_error,
             "allow_status_for_all": self.settings.allow_status_for_all,
         }
 

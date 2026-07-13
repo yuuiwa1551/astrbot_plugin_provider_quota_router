@@ -3,7 +3,7 @@
     "description": "启用插件",
     "type": "bool",
     "hint": "关闭后不做 provider 路由，也不记录 pending reservation。",
-    "default": true
+    "default": false
   },
   "timezone": {
     "description": "统计时区",
@@ -73,13 +73,31 @@
     "description": "演练模式",
     "type": "bool",
     "hint": "开启后只记录决策，不实际切换 provider 或预占额度。",
-    "default": false
+    "default": true
   },
   "use_astrbot_fallback_chain": {
     "description": "使用 AstrBot 默认 fallback 链",
     "type": "bool",
     "hint": "chains_json 为空时，自动使用 default_provider_id + fallback_chat_models。",
     "default": true
+  },
+  "fallback_watch_interval_seconds": {
+    "description": "AstrBot fallback 检查间隔",
+    "type": "int",
+    "hint": "仅在使用 AstrBot 默认 fallback 链时生效。每隔多少秒检查 cmd_config.json，默认 5 分钟。",
+    "default": 300
+  },
+  "strict_priority_order": {
+    "description": "严格按链首优先",
+    "type": "bool",
+    "hint": "每次都从 fallback 列表第一项开始检查额度与模态，不沿用会话当前模型作为扫描起点。",
+    "default": true
+  },
+  "disable_astrbot_error_fallback": {
+    "description": "禁用 AstrBot 错误 fallback",
+    "type": "bool",
+    "hint": "开启后，本插件接管的请求只会因额度决策换模型；403、超时等 provider 错误不会再绕过额度判断进入后续模型。",
+    "default": false
   },
   "chains_json": {
     "description": "自定义路由链 JSON",

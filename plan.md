@@ -4,11 +4,12 @@
 
 新建独立插件 `astrbot_plugin_provider_quota_router`，负责全局 provider/model 日额度路由。插件不修改 AstrBot 核心，不改 `cmd_config.json` 默认 provider，不合并到现有第三方 `astrbot_plugin_token_controller`。
 
-实施按三期推进：
+实施按四期推进：
 
 - 1期：命令行可管理的 MVP，先做到稳定路由和可验证统计。
 - 2期：Plugin Page、报表、告警和更细计费口径。
 - 3期：在 Plugin Page 增加历史 token 图表，覆盖每日模型消耗、单日占比和单模型趋势。
+- 4期：修复 AstrBot fallback 链热更新与不安全的 `use_last` 降级行为。
 
 ## 技术决策
 
@@ -84,26 +85,68 @@
 - 低额度 smoke test 覆盖 normal、switch、exhausted 三种状态。
 - 多并发请求下 reservation 不丢、不永久占用。
 
+## 4期配置热更新与费用安全
+
+目标：当 AstrBot `cmd_config.json` 的 `default_provider_id + fallback_chat_models` 发生变化时，插件在无需重启的情况下自动换链，并避免把“不支持请求模态”的 provider 当作额度耗尽后的可用兜底。
+
+状态：v0.4.0 已完成并同步实时 Docker 环境。
+
+交付：
+
+- 后台低频轮询 `cmd_config.json` 文件签名，默认 2 秒检查一次。
+- 使用 `utf-8-sig` 直接读取 AstrBot 配置，构建新的 fallback 链。
+- 仅在没有自定义 `chains_json` 且 `use_astrbot_fallback_chain=true` 时启用自动换链。
+- 配置写入中、JSON 无效或链为空时保留上一份有效链，不清空运行路由。
+- 在 Plugin Page API 中暴露配置来源、监视状态、最后加载时间和最近错误。
+- `use_last` 只允许处理纯额度耗尽；provider 缺失或模态不支持时改为阻断。
+
+验证：
+
+- 纯 Python 单元测试覆盖 BOM、链去重、写入竞争、无效 JSON 和签名变化。
+- 容器内执行 `compileall` 和 package import。
+- 同步实时插件后重载 AstrBot，确认 `/chains` 立即显示磁盘当前链。
+- 触发一次无语义配置文件变更，确认监视器自动记录重新加载且链保持正确。
+- 验证图片请求不会再因 `modality_not_supported` 被 `use_last` 强制送往链尾。
+
 ## 延后项
 
 - 接入火山引擎官方用量 API。
 - 根据 API key 或账号做 quota 分组。
 - 与 `astrbot_plugin_lb_provider` 做专门集成。
-- provider 运行中 fallback 的即时精确归因。
+
+## 5期严格优先级与可选核心 fallback 隔离
+
+目标：让 fallback 列表真正表示全局优先级，而不是从会话当前 provider 开始；同时提供可选的 AstrBot 错误 fallback 费用保护，默认保留可用性兜底。
+
+状态：v0.5.0 已完成并同步实时 Docker 环境，详见 `5期plan.md`。
+
+交付：
+
+- `strict_priority_order=true` 时每次从链首扫描，依次检查额度和请求模态。
+- `disable_astrbot_error_fallback` 可通过事件标记精确保护插件已接管的请求；默认关闭。
+- runner guard 在构建 agent 时清空该请求的 fallback providers，插件卸载时恢复原方法。
+- 默认配置文件检查间隔调整为 300 秒。
+- 状态 API 和 Plugin Page 显示严格优先级及核心 guard 实际状态。
+
+验证：
+
+- 当前 provider 位于链尾时，链首仍有额度则必须切回链首。
+- 图片请求优先命中靠前且支持图片的 provider。
+- 标记请求不携带 AstrBot 核心 fallback，未标记请求保持原行为。
+- guard 关闭时，火山 provider 403 后仍能按配置 fallback 到可用 DeepSeek provider。
 
 ## 本机当前参考链
 
 当前 `cmd_config.json` 的 AstrBot fallback 链可先作为默认配置：
 
 ```text
-openai/doubao-seed-2-0-lite-260215
+openai/doubao-seed-2-1-turbo-260628
+openai/doubao-seed-2-1-pro-260628
 openai/doubao-seed-2-0-mini-260215
 openai/doubao-seed-2-0-pro-260215
-doubao-seed-1-8-251228
-openai/doubao-seed-1-6-flash-250828
-openai/doubao-seed-1-6-lite-251015
-openai/doubao-seed-1-6-250615
-openai/doubao-seed-1-6-251015
+openai/doubao-seed-2-0-lite-260215
+deepseek/deepseek-v4-flash
+deepseek/deepseek-v4-pro
 ```
 
 注意：如果额度是按“单一模型”而不是 provider ID 计算，应优先以 `provider_model` 作为 quota key。

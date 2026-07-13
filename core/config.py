@@ -42,6 +42,9 @@ class RouterSettings:
     exhausted_action: str = "stop"
     dry_run: bool = False
     use_astrbot_fallback_chain: bool = True
+    fallback_watch_interval_seconds: int = 300
+    strict_priority_order: bool = True
+    disable_astrbot_error_fallback: bool = False
     allow_status_for_all: bool = True
     admin_user_ids: set[str] = field(default_factory=set)
     exhausted_message: str = (
@@ -73,6 +76,13 @@ class RouterSettings:
             exhausted_action=exhausted_action,
             dry_run=bool(raw.get("dry_run", False)),
             use_astrbot_fallback_chain=bool(raw.get("use_astrbot_fallback_chain", True)),
+            fallback_watch_interval_seconds=max(
+                1, _positive_int(raw.get("fallback_watch_interval_seconds"), 300)
+            ),
+            strict_priority_order=bool(raw.get("strict_priority_order", True)),
+            disable_astrbot_error_fallback=bool(
+                raw.get("disable_astrbot_error_fallback", False)
+            ),
             allow_status_for_all=bool(raw.get("allow_status_for_all", True)),
             admin_user_ids={str(item).strip() for item in raw.get("admin_user_ids", []) if str(item).strip()},
             exhausted_message=str(raw.get("exhausted_message") or cls.exhausted_message),
@@ -125,3 +135,7 @@ def _optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def is_quota_only_exhaustion(reasons: list[str]) -> bool:
+    return bool(reasons) and all(reason == "quota_exceeded" for reason in reasons)

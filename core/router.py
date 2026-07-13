@@ -6,7 +6,7 @@ from typing import Any
 
 from astrbot.core.provider.provider import Provider
 
-from .config import ChainConfig, RouterSettings
+from .config import ChainConfig, RouterSettings, is_quota_only_exhaustion
 from .ledger import QuotaLedger, UsageRecord
 from .state import QuotaStateStore
 from .time_window import UsageWindow
@@ -64,7 +64,7 @@ class ProviderQuotaRouter:
         window: UsageWindow,
         required_modalities: set[str] | None = None,
     ) -> RouteDecision:
-        chain, start_index = self._find_chain(current_provider_id)
+        chain, current_index = self._find_chain(current_provider_id)
         if chain is None:
             return RouteDecision(
                 action="skip",
@@ -74,6 +74,7 @@ class ProviderQuotaRouter:
 
         required_modalities = required_modalities or set()
         states: list[CandidateState] = []
+        start_index = 0 if self.settings.strict_priority_order else current_index
         for provider_id in chain.providers[start_index:]:
             provider = self.get_provider(provider_id)
             if not isinstance(provider, Provider):
@@ -139,7 +140,14 @@ class ProviderQuotaRouter:
                 reservation_tokens=chain.reservation(self.settings.default_request_reservation_tokens),
                 candidates=states,
             )
-        if self.settings.exhausted_action == "use_last" and states:
+        quota_only_exhaustion = is_quota_only_exhaustion(
+            [state.reason for state in states]
+        )
+        if (
+            self.settings.exhausted_action == "use_last"
+            and states
+            and quota_only_exhaustion
+        ):
             last = states[-1]
             return RouteDecision(
                 action="use_last",
@@ -153,7 +161,7 @@ class ProviderQuotaRouter:
             )
         return RouteDecision(
             action="block",
-            reason="chain_exhausted",
+            reason="chain_exhausted" if quota_only_exhaustion else "chain_unavailable",
             chain_name=chain.name,
             original_provider_id=current_provider_id,
             candidates=states,
