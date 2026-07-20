@@ -945,11 +945,13 @@
         const overlays = runtime.overlays || [];
         const cooldowns = runtime.cooldowns || [];
         const circuits = runtime.provider_group_circuits || [];
+        const notificationThrottles = runtime.notification_throttles || [];
         const details = [
           `pending: ${runtime.pending_count || 0}`,
           `overlay: ${runtime.overlay_count || 0}`,
           `cooldown: ${runtime.cooldown_count || 0}`,
           `provider group circuit: ${runtime.provider_group_circuit_count || 0}`,
+          `admin alert throttle: ${runtime.notification_throttle_count || 0}`,
         ];
         if (pending[0]) {
           details.push(`first pending: ${pending[0].provider_id || "-"} ${formatTokens(pending[0].tokens)}`);
@@ -971,6 +973,10 @@
           if (circuit.last_error) {
             details.push(`last error: ${circuit.last_error}`);
           }
+        }
+        if (notificationThrottles[0]) {
+          const throttle = notificationThrottles[0];
+          details.push(`last admin alert: ${new Date(Number(throttle.claimed_at) * 1000).toLocaleString()}`);
         }
         els.runtimeList.innerHTML = `
           <div class="list-item">

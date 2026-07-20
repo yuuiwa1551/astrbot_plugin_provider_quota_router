@@ -23,6 +23,7 @@ from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.star.filter.command import GreedyStr
 
 from .core.config import ChainConfig, RouterSettings
+from .core.admin_alerts import build_provider_error_alert, resolve_admin_targets
 from .core.core_fallback_guard import (
     CORE_FALLBACK_DROPPED_EXTRA_KEY,
     CORE_FALLBACK_GUARD_EXTRA_KEY,
@@ -37,7 +38,12 @@ from .core.fallback_config import (
     resolve_cmd_config_path,
 )
 from .core.ledger import QuotaLedger
-from .core.provider_errors import is_http_403_response, response_error_text
+from .core.provider_errors import (
+    is_http_403_error_text,
+    is_provider_error_response,
+    is_provider_error_text,
+    response_error_text,
+)
 from .core.reports import (
     build_alerts,
     build_summary,
@@ -51,7 +57,7 @@ from .core.time_window import current_window, window_for_local_date
 
 
 PLUGIN_NAME = "astrbot_plugin_provider_quota_router"
-PLUGIN_VERSION = "0.7.0"
+PLUGIN_VERSION = "0.8.0"
 PLUGIN_REPOSITORY = "https://github.com/yuuiwa1551/astrbot_plugin_provider_quota_router"
 PLUGIN_DESCRIPTION = "按 provider/model 每日 token 额度自动降级路由 AstrBot 聊天模型。"
 HOOK_PRIORITY = 900
@@ -80,6 +86,9 @@ CONFIG_KEYS = {
     "volcengine_403_cooldown_seconds",
     "volcengine_probe_check_interval_seconds",
     "volcengine_probe_timeout_seconds",
+    "provider_error_admin_notify_enabled",
+    "provider_error_admin_notify_interval_seconds",
+    "provider_error_suppress_current_chat",
     "allow_status_for_all",
     "admin_user_ids",
     "exhausted_message",
@@ -556,6 +565,10 @@ class ProviderQuotaRouterPlugin(Star):
         event.set_extra("provider_quota_router_request_id", request_id)
         event.set_extra("provider_quota_router_decision", decision.action)
         event.set_extra("provider_quota_router_reason", decision.reason)
+        event.set_extra(
+            "provider_quota_router_selected_provider_id",
+            str(decision.selected_provider_id or current_provider_id),
+        )
 
         if decision.action == "block":
             event.set_extra("provider_quota_router_blocked", True)
@@ -623,28 +636,20 @@ class ProviderQuotaRouterPlugin(Star):
             actual_tokens=actual_tokens,
             overlay_ttl_seconds=self.settings.overlay_ttl_seconds,
         )
+        selected_provider_id = str(
+            (pending or {}).get("provider_id")
+            or event.get_extra("provider_quota_router_selected_provider_id")
+            or ""
+        )
         if (
-            pending
-            and self.settings.volcengine_403_circuit_enabled
+            selected_provider_id
             and not self.settings.dry_run
-            and self.router.is_volcengine_provider(
-                str(pending.get("provider_id") or "")
-            )
-            and is_http_403_response(response)
+            and is_provider_error_response(response)
         ):
-            error_text = response_error_text(response)
-            circuit = await self.state.open_provider_group_circuit(
-                group_id=VOLCENGINE_GROUP_ID,
-                trigger_provider_id=str(pending.get("provider_id") or ""),
-                ttl_seconds=self.settings.volcengine_403_cooldown_seconds,
-                error=error_text,
-            )
-            logger.error(
-                "[ProviderQuotaRouter] Volcengine HTTP 403 circuit opened: provider=%s retry_at=%s",
-                pending.get("provider_id"),
-                datetime.fromtimestamp(
-                    float(circuit.get("retry_at") or 0)
-                ).astimezone().isoformat(timespec="seconds"),
+            await self._handle_provider_error(
+                event=event,
+                provider_id=selected_provider_id,
+                error_text=response_error_text(response),
             )
         if pending and actual_tokens:
             logger.info(
@@ -671,6 +676,150 @@ class ProviderQuotaRouterPlugin(Star):
                         float(cooldown.get("expires_at") or 0)
                     ).astimezone().isoformat(timespec="seconds"),
                 )
+
+    async def _handle_provider_error(
+        self,
+        *,
+        event: AstrMessageEvent,
+        provider_id: str,
+        error_text: str,
+    ) -> None:
+        if event.get_extra("provider_quota_router_provider_error_handled"):
+            return
+        event.set_extra("provider_quota_router_provider_error_handled", True)
+        event.set_extra("provider_quota_router_suppress_provider_error", True)
+        circuit: dict[str, Any] | None = None
+        if (
+            self.settings.volcengine_403_circuit_enabled
+            and self.router.is_volcengine_provider(provider_id)
+            and is_http_403_error_text(error_text)
+        ):
+            circuit = await self.state.open_provider_group_circuit(
+                group_id=VOLCENGINE_GROUP_ID,
+                trigger_provider_id=provider_id,
+                ttl_seconds=self.settings.volcengine_403_cooldown_seconds,
+                error=error_text,
+            )
+            logger.error(
+                "[ProviderQuotaRouter] Volcengine HTTP 403 circuit opened: provider=%s retry_at=%s",
+                provider_id,
+                datetime.fromtimestamp(
+                    float(circuit.get("retry_at") or 0)
+                ).astimezone().isoformat(timespec="seconds"),
+            )
+        await self._notify_provider_error_admins(
+            event=event,
+            provider_id=provider_id,
+            error_text=error_text,
+            circuit=circuit,
+        )
+
+    async def _notify_provider_error_admins(
+        self,
+        *,
+        event: AstrMessageEvent,
+        provider_id: str,
+        error_text: str,
+        circuit: dict[str, Any] | None,
+    ) -> None:
+        if not self.settings.provider_error_admin_notify_enabled:
+            return
+        targets = resolve_admin_targets(
+            context=self.context,
+            event=event,
+            configured_admin_ids=self.settings.admin_user_ids,
+        )
+        if not targets:
+            logger.warning(
+                "[ProviderQuotaRouter] provider error admin alert skipped: no admin targets"
+            )
+            return
+        claim = await self.state.claim_notification(
+            key="provider_error_admin_alert",
+            interval_seconds=self.settings.provider_error_admin_notify_interval_seconds,
+            detail=f"{provider_id}: {error_text}",
+        )
+        if not claim:
+            logger.info(
+                "[ProviderQuotaRouter] provider error admin alert throttled: provider=%s",
+                provider_id,
+            )
+            return
+        message = build_provider_error_alert(
+            provider_id=provider_id,
+            error_text=error_text,
+            source_origin=str(event.unified_msg_origin or ""),
+            circuit_retry_at=(
+                float(circuit.get("retry_at") or 0) if circuit else None
+            ),
+            interval_seconds=self.settings.provider_error_admin_notify_interval_seconds,
+        )
+        sent = 0
+        for target in targets:
+            try:
+                await self.context.send_message(
+                    target,
+                    MessageChain().message(message),
+                )
+                sent += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[ProviderQuotaRouter] provider error admin alert failed: target=%s error=%s",
+                    target,
+                    exc,
+                )
+        logger.warning(
+            "[ProviderQuotaRouter] provider error admin alert sent: provider=%s sent=%s targets=%s",
+            provider_id,
+            sent,
+            len(targets),
+        )
+
+    @filter.on_decorating_result(priority=HOOK_PRIORITY)
+    async def suppress_provider_error_result(self, event: AstrMessageEvent) -> None:
+        if not self.settings.enabled or self.settings.dry_run:
+            return
+        result = event.get_result()
+        selected_provider_id = str(
+            event.get_extra("provider_quota_router_selected_provider_id") or ""
+        )
+        result_text = ""
+        if result is not None:
+            try:
+                result_text = str(result.get_plain_text() or "")
+            except Exception:  # noqa: BLE001
+                result_text = ""
+        if (
+            selected_provider_id
+            and not event.get_extra("provider_quota_router_provider_error_handled")
+            and is_provider_error_text(result_text)
+        ):
+            request_id = str(
+                event.get_extra("provider_quota_router_request_id") or ""
+            )
+            if request_id:
+                await self.state.release(
+                    request_id=request_id,
+                    actual_tokens=None,
+                    overlay_ttl_seconds=self.settings.overlay_ttl_seconds,
+                )
+            await self._handle_provider_error(
+                event=event,
+                provider_id=selected_provider_id,
+                error_text=result_text,
+            )
+        if (
+            not self.settings.provider_error_suppress_current_chat
+            or not event.get_extra("provider_quota_router_suppress_provider_error")
+        ):
+            return
+        if result is not None:
+            result.chain.clear()
+        event.stop_event()
+        logger.info(
+            "[ProviderQuotaRouter] provider error reply suppressed in source conversation: %s",
+            event.unified_msg_origin,
+        )
 
     @filter.command("quota", desc="查看或管理 provider/model token 额度路由。")
     async def quota_command(self, event: AstrMessageEvent, args: GreedyStr = ""):
@@ -868,6 +1017,12 @@ class ProviderQuotaRouterPlugin(Star):
                 "provider_group_circuits": list(
                     (state.get("provider_group_circuits", {}) or {}).values()
                 ),
+                "notification_throttle_count": len(
+                    state.get("notification_throttles", {}) or {}
+                ),
+                "notification_throttles": list(
+                    (state.get("notification_throttles", {}) or {}).values()
+                ),
             },
             "decisions": read_recent_decisions(self.state.decisions_path, limit=30),
         }
@@ -901,6 +1056,9 @@ class ProviderQuotaRouterPlugin(Star):
             "volcengine_403_cooldown_seconds": self.settings.volcengine_403_cooldown_seconds,
             "volcengine_probe_check_interval_seconds": self.settings.volcengine_probe_check_interval_seconds,
             "volcengine_probe_timeout_seconds": self.settings.volcengine_probe_timeout_seconds,
+            "provider_error_admin_notify_enabled": self.settings.provider_error_admin_notify_enabled,
+            "provider_error_admin_notify_interval_seconds": self.settings.provider_error_admin_notify_interval_seconds,
+            "provider_error_suppress_current_chat": self.settings.provider_error_suppress_current_chat,
             "core_fallback_guard_active": self._core_fallback_guard_active,
             "fallback_watch_active": self._fallback_chain_is_dynamic,
             "fallback_config_path": str(self._cmd_config_path),

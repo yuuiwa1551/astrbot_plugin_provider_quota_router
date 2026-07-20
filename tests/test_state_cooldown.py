@@ -8,6 +8,32 @@ from core.state import QuotaStateStore
 
 
 class StateCooldownTests(unittest.IsolatedAsyncioTestCase):
+    async def test_notification_claim_is_persistent_and_throttled(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = QuotaStateStore(Path(temp_dir))
+            first = await store.claim_notification(
+                key="provider_error_admin_alert",
+                interval_seconds=3_600,
+                detail="HTTP 403",
+            )
+            self.assertIsNotNone(first)
+
+            reloaded = QuotaStateStore(Path(temp_dir))
+            duplicate = await reloaded.claim_notification(
+                key="provider_error_admin_alert",
+                interval_seconds=3_600,
+                detail="another error",
+            )
+            self.assertIsNone(duplicate)
+
+            await reloaded.reset_cache()
+            after_reset = await reloaded.claim_notification(
+                key="provider_error_admin_alert",
+                interval_seconds=3_600,
+                detail="after reset",
+            )
+            self.assertIsNone(after_reset)
+
     async def test_provider_group_circuit_persists_and_probe_controls_recovery(
         self,
     ) -> None:

@@ -4,7 +4,7 @@
 
 新建独立插件 `astrbot_plugin_provider_quota_router`，负责全局 provider/model 日额度路由。插件不修改 AstrBot 核心，不改 `cmd_config.json` 默认 provider，不合并到现有第三方 `astrbot_plugin_token_controller`。
 
-实施按七期推进：
+实施按八期推进：
 
 - 1期：命令行可管理的 MVP，先做到稳定路由和可验证统计。
 - 2期：Plugin Page、报表、告警和更细计费口径。
@@ -13,6 +13,7 @@
 - 5期：严格按 fallback 全局优先级路由，并可隔离 AstrBot 核心错误 fallback。
 - 6期：只限制火山 provider，DeepSeek 不限额；增加跨 11:00 窗口的 24 小时冷却。
 - 7期：火山 403 组级熔断 30 分钟，到期后台随机半开探测并自动恢复。
+- 8期：Provider 错误不在原会话展示，改为每小时最多一次的管理员私聊告警。
 
 ## 技术决策
 
@@ -180,3 +181,9 @@ deepseek/deepseek-v4-pro
 - 熔断期间跳过全部火山候选，继续扫描非火山模型。
 - 后台半开探测成功恢复、失败续期 30 分钟。
 - 状态 API 和 Plugin Page 展示熔断与探测状态。
+
+## 8期 Provider 错误静默与管理员限频私聊
+
+目标：本插件接管的模型最终报错时，不在原群聊或私聊窗口展示技术错误；改为私聊 Bot 管理员，全部 Provider 错误共用一小时限频，同时确保最终 `role=err` 路径仍会触发火山 403 组级熔断。
+
+状态：v0.8.0 已完成并同步实时 Docker 环境，详见 `8期plan.md`。

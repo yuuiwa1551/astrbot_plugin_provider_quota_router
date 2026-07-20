@@ -3,7 +3,11 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
-from core.provider_errors import is_http_403_response
+from core.provider_errors import (
+    is_http_403_error_text,
+    is_http_403_response,
+    is_provider_error_text,
+)
 
 
 class ProviderErrorTests(unittest.TestCase):
@@ -27,6 +31,20 @@ class ProviderErrorTests(unittest.TestCase):
             is_http_403_response(
                 SimpleNamespace(role="err", completion_text="Error code: 429")
             )
+        )
+
+    def test_detects_decorated_agent_provider_error_text(self) -> None:
+        text = (
+            "LLM 响应错误: All chat models failed: ProviderAPIError: "
+            "Error code: 403 AccountOverdueError"
+        )
+
+        self.assertTrue(is_provider_error_text(text))
+        self.assertTrue(is_http_403_error_text(text))
+
+    def test_does_not_treat_normal_model_text_as_provider_error(self) -> None:
+        self.assertFalse(
+            is_provider_error_text("Error code: 403 表示服务器拒绝了请求。")
         )
 
 

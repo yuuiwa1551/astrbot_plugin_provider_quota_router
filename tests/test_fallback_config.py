@@ -30,6 +30,11 @@ class FallbackConfigTests(unittest.TestCase):
         self.assertTrue(settings.is_volcengine_source("openai"))
         self.assertEqual(settings.volcengine_403_cooldown_seconds, 1_800)
         self.assertEqual(settings.volcengine_probe_check_interval_seconds, 30)
+        self.assertTrue(settings.provider_error_admin_notify_enabled)
+        self.assertEqual(
+            settings.provider_error_admin_notify_interval_seconds, 3_600
+        )
+        self.assertTrue(settings.provider_error_suppress_current_chat)
 
     def test_build_chain_deduplicates_default_provider(self) -> None:
         chain = build_astrbot_fallback_chain(

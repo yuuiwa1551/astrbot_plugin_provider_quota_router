@@ -52,6 +52,9 @@ class RouterSettings:
     volcengine_403_cooldown_seconds: int = 1_800
     volcengine_probe_check_interval_seconds: int = 30
     volcengine_probe_timeout_seconds: int = 30
+    provider_error_admin_notify_enabled: bool = True
+    provider_error_admin_notify_interval_seconds: int = 3_600
+    provider_error_suppress_current_chat: bool = True
     allow_status_for_all: bool = True
     admin_user_ids: set[str] = field(default_factory=set)
     exhausted_message: str = (
@@ -113,6 +116,19 @@ class RouterSettings:
             ),
             volcengine_probe_timeout_seconds=max(
                 5, _positive_int(raw.get("volcengine_probe_timeout_seconds"), 30)
+            ),
+            provider_error_admin_notify_enabled=bool(
+                raw.get("provider_error_admin_notify_enabled", True)
+            ),
+            provider_error_admin_notify_interval_seconds=max(
+                60,
+                _positive_int(
+                    raw.get("provider_error_admin_notify_interval_seconds"),
+                    3_600,
+                ),
+            ),
+            provider_error_suppress_current_chat=bool(
+                raw.get("provider_error_suppress_current_chat", True)
             ),
             allow_status_for_all=bool(raw.get("allow_status_for_all", True)),
             admin_user_ids={str(item).strip() for item in raw.get("admin_user_ids", []) if str(item).strip()},

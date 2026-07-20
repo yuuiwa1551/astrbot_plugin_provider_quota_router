@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.8.0
+
+- 本插件接管的任意模型最终返回 Provider 错误时，默认清空原会话错误回复并私聊 AstrBot 管理员。
+- 全部 Provider 错误共用一个持久化 3600 秒限频键，重启和 `/quota reset-cache` 后仍不会重复刷屏。
+- 在发送前 `on_decorating_result` 增加错误兜底，覆盖 AstrBot 最终 `role=err` 不调用 Agent done hook 的路径，并确保火山 403 仍会开启整组熔断。
+- 状态 API 和 Plugin Page 增加管理员告警限频状态。
+
 ## v0.7.0
 
 - 任一火山模型返回 HTTP 403 / `AccountOverdueError` 后，持久化整组火山熔断并跳过全部火山候选，默认冷却 30 分钟。

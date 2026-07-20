@@ -141,6 +141,24 @@
     "hint": "随机火山模型最小探测请求的最大等待时间，默认 30 秒。",
     "default": 30
   },
+  "provider_error_admin_notify_enabled": {
+    "description": "Provider 错误私聊管理员",
+    "type": "bool",
+    "hint": "本插件接管的模型最终返回 Provider 错误时，私聊通知管理员，不在原会话展示错误文本。",
+    "default": true
+  },
+  "provider_error_admin_notify_interval_seconds": {
+    "description": "管理员错误告警间隔",
+    "type": "int",
+    "hint": "所有 Provider 错误共用一个持久化限频窗口，默认 3600 秒内最多私聊一次。",
+    "default": 3600
+  },
+  "provider_error_suppress_current_chat": {
+    "description": "原会话静默 Provider 错误",
+    "type": "bool",
+    "hint": "开启后，已转发给管理员的 Provider 错误不会在触发它的群聊或私聊窗口发送。",
+    "default": true
+  },
   "chains_json": {
     "description": "自定义路由链 JSON",
     "type": "text",
@@ -156,7 +174,7 @@
   "admin_user_ids": {
     "description": "管理员用户 ID",
     "type": "list",
-    "hint": "为空时不限制管理命令；填写后只有这些发送者可 reload/reset/dry-run。",
+    "hint": "为空时管理命令不受限，错误私聊使用 AstrBot 核心 admins_id；填写后同时作为命令管理员和错误通知目标。",
     "default": []
   },
   "exhausted_message": {

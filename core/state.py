@@ -270,6 +270,34 @@ class QuotaStateStore:
             self._save_state(state)
             return dict(item)
 
+    async def claim_notification(
+        self,
+        *,
+        key: str,
+        interval_seconds: int,
+        detail: str = "",
+    ) -> dict[str, Any] | None:
+        async with self._lock:
+            state = self._load_state()
+            self._prune_state(state)
+            now = time.time()
+            existing = state["notification_throttles"].get(key)
+            if (
+                isinstance(existing, dict)
+                and now - float(existing.get("claimed_at") or 0)
+                < max(1, int(interval_seconds))
+            ):
+                self._save_state(state)
+                return None
+            item = {
+                "key": key,
+                "claimed_at": now,
+                "detail": str(detail or "")[:1000],
+            }
+            state["notification_throttles"][key] = item
+            self._save_state(state)
+            return dict(item)
+
     async def snapshot(self) -> dict[str, Any]:
         async with self._lock:
             state = self._load_state()
@@ -283,12 +311,15 @@ class QuotaStateStore:
             self._prune_state(state)
             self._save_state(
                 {
-                    "version": 3,
+                    "version": 4,
                     "pending": {},
                     "overlays": [],
                     "cooldowns": state.get("cooldowns", {}),
                     "provider_group_circuits": state.get(
                         "provider_group_circuits", {}
+                    ),
+                    "notification_throttles": state.get(
+                        "notification_throttles", {}
                     ),
                 }
             )
@@ -308,11 +339,12 @@ class QuotaStateStore:
             return self._empty_state()
         if not isinstance(data, dict):
             return self._empty_state()
-        data["version"] = 3
+        data["version"] = 4
         data.setdefault("pending", {})
         data.setdefault("overlays", [])
         data.setdefault("cooldowns", {})
         data.setdefault("provider_group_circuits", {})
+        data.setdefault("notification_throttles", {})
         if not isinstance(data["pending"], dict):
             data["pending"] = {}
         if not isinstance(data["overlays"], list):
@@ -321,16 +353,19 @@ class QuotaStateStore:
             data["cooldowns"] = {}
         if not isinstance(data["provider_group_circuits"], dict):
             data["provider_group_circuits"] = {}
+        if not isinstance(data["notification_throttles"], dict):
+            data["notification_throttles"] = {}
         return data
 
     @staticmethod
     def _empty_state() -> dict[str, Any]:
         return {
-            "version": 3,
+            "version": 4,
             "pending": {},
             "overlays": [],
             "cooldowns": {},
             "provider_group_circuits": {},
+            "notification_throttles": {},
         }
 
     def _save_state(self, state: dict[str, Any]) -> None:
@@ -387,3 +422,11 @@ class QuotaStateStore:
                     )
                 cleaned[str(key)] = item
             state["provider_group_circuits"] = cleaned
+        throttles = state.get("notification_throttles", {})
+        if isinstance(throttles, dict):
+            state["notification_throttles"] = {
+                str(key): item
+                for key, item in throttles.items()
+                if isinstance(item, dict)
+                and now - float(item.get("claimed_at") or 0) < 7 * 86_400
+            }
