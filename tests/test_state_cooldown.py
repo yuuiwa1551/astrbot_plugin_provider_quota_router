@@ -126,7 +126,7 @@ class StateCooldownTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(created["expires_at"], reset_at)
             self.assertEqual(created["reason"], "upstream_quota_exhausted")
 
-    async def test_rebases_old_opencode_token_cooldown_to_reset_boundary(self) -> None:
+    async def test_clears_old_opencode_token_cooldown(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = QuotaStateStore(Path(temp_dir))
             await store.start_cooldown(
@@ -137,18 +137,33 @@ class StateCooldownTests(unittest.IsolatedAsyncioTestCase):
                 ttl_seconds=86_400,
             )
 
-            changed = await store.rebase_cooldowns_for_provider_prefixes(
+            changed = await store.clear_legacy_cooldowns_for_provider_prefixes(
                 provider_prefixes=("opencode-zen/",),
-                window_id="window-new",
-                expires_at=1_900_000_000.0,
-                reason="upstream_quota_migrated",
             )
             cooldown = await store.get_cooldown(quota_key="mimo-v2.5-free")
 
             self.assertEqual(changed, 1)
-            self.assertEqual(cooldown["window_id"], "window-new")
-            self.assertEqual(cooldown["expires_at"], 1_900_000_000.0)
-            self.assertEqual(cooldown["reason"], "upstream_quota_migrated")
+            self.assertIsNone(cooldown)
+
+    async def test_preserves_real_opencode_upstream_quota_cooldown(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = QuotaStateStore(Path(temp_dir))
+            await store.set_cooldown_until(
+                quota_key="mimo-v2.5-free",
+                window_id="window-a",
+                provider_id="opencode-zen/mimo-v2.5-free",
+                provider_model="mimo-v2.5-free",
+                expires_at=1_900_000_000.0,
+                reason="upstream_quota_exhausted",
+            )
+
+            changed = await store.clear_legacy_cooldowns_for_provider_prefixes(
+                provider_prefixes=("opencode-zen/",),
+            )
+            cooldown = await store.get_cooldown(quota_key="mimo-v2.5-free")
+
+            self.assertEqual(changed, 0)
+            self.assertEqual(cooldown["reason"], "upstream_quota_exhausted")
 
 
 if __name__ == "__main__":

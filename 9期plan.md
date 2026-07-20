@@ -11,7 +11,7 @@
 - 在普通 Agent 请求以及图片描述等直接调用 Provider 的路径捕获该错误。
 - 按具体 Provider/model 写入持久化 cooldown，截止时间为当前额度窗口的 `end_local`，即下一个 `11:00`。
 - 路由时跳过仍在冷却的 opencode 模型；同一 source 下其他未报错模型不连坐。
-- 启动时把当前窗口内由旧 token 阈值生成的 opencode 24 小时 cooldown 收敛到下一个 11:00。
+- 启动或重载时清除由旧 token 阈值生成的 opencode cooldown；只保留真实 `FreeUsageLimitError` 产生的 cooldown。
 
 ## 技术决策
 
@@ -35,6 +35,7 @@
 
 ## 状态
 
-- v0.9.0 已完成并同步实时 Docker 环境。
-- 容器内 `compileall` 与 39 个单元测试通过；包导入、插件加载、状态 API 和持久化状态均已验证。
-- 实时两个 opencode 模型的旧 token cooldown 已迁移为 `upstream_quota_migrated`，统一于 2026-07-21 11:00（北京时间）恢复；后续只会冷却实际返回 `FreeUsageLimitError` 的模型。
+- v0.9.1 已完成：opencode 的 1 美元额度不再由本地 token 数推算。
+- 启动时删除旧 token 阈值及 v0.9.0 误迁移的 opencode cooldown，只保留实际 `FreeUsageLimitError` 状态。
+- 实时状态中 DeepSeek 的误冷却已删除；日志已确认额度耗尽的 Mimo 2.5 保留到下一个 11:00。
+- 容器源码与实时部署各通过 40 个单元测试；重启日志和认证状态 API 已验证 v0.9.1、guard、300 秒配置监视与两种 opencode 状态。

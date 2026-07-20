@@ -62,7 +62,7 @@ from .core.time_window import current_window, window_for_local_date
 
 
 PLUGIN_NAME = "astrbot_plugin_provider_quota_router"
-PLUGIN_VERSION = "0.9.0"
+PLUGIN_VERSION = "0.9.1"
 PLUGIN_REPOSITORY = "https://github.com/yuuiwa1551/astrbot_plugin_provider_quota_router"
 PLUGIN_DESCRIPTION = "按 provider/model 每日 token 额度自动降级路由 AstrBot 聊天模型。"
 HOOK_PRIORITY = 900
@@ -151,7 +151,7 @@ class ProviderQuotaRouterPlugin(Star):
     async def initialize(self) -> None:
         self._sync_core_fallback_guard()
         self._sync_opencode_quota_guard()
-        await self._normalize_upstream_quota_cooldowns()
+        await self._clear_legacy_upstream_quota_cooldowns()
         self._cooldown_reconcile_task = asyncio.create_task(
             self._reconcile_cooldowns_after_startup(),
             name="provider-quota-router-cooldown-reconcile",
@@ -412,24 +412,17 @@ class ProviderQuotaRouterPlugin(Star):
             )
         self._opencode_quota_guard_active = False
 
-    async def _normalize_upstream_quota_cooldowns(self) -> None:
+    async def _clear_legacy_upstream_quota_cooldowns(self) -> None:
         if not self.settings.upstream_quota_provider_prefixes:
             return
-        window = current_window(
-            timezone_name=self.settings.timezone,
-            reset_time=self.settings.reset_time,
-        )
-        changed = await self.state.rebase_cooldowns_for_provider_prefixes(
+        changed = await self.state.clear_legacy_cooldowns_for_provider_prefixes(
             provider_prefixes=self.settings.upstream_quota_provider_prefixes,
-            window_id=window.window_id,
-            expires_at=window.end_local.timestamp(),
-            reason="upstream_quota_migrated",
         )
         if changed:
             logger.warning(
-                "[ProviderQuotaRouter] rebased %s opencode token cooldown(s) to next reset: %s",
+                "[ProviderQuotaRouter] cleared %s legacy opencode token cooldown(s); "
+                "only upstream FreeUsageLimitError cooldowns are preserved",
                 changed,
-                window.end_local.isoformat(timespec="seconds"),
             )
 
     async def opencode_quota_guard_cooldown(
@@ -1014,7 +1007,7 @@ class ProviderQuotaRouterPlugin(Star):
             self._reload_runtime_settings()
             self._sync_core_fallback_guard()
             self._sync_opencode_quota_guard()
-            await self._normalize_upstream_quota_cooldowns()
+            await self._clear_legacy_upstream_quota_cooldowns()
             checked_count, cooldown_count = await self.router.reconcile_cooldowns(
                 window=current_window(
                     timezone_name=self.settings.timezone,

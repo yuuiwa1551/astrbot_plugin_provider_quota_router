@@ -151,13 +151,11 @@ class QuotaStateStore:
             self._save_state(state)
             return dict(item)
 
-    async def rebase_cooldowns_for_provider_prefixes(
+    async def clear_legacy_cooldowns_for_provider_prefixes(
         self,
         *,
         provider_prefixes: tuple[str, ...],
-        window_id: str,
-        expires_at: float,
-        reason: str,
+        preserve_reasons: tuple[str, ...] = ("upstream_quota_exhausted",),
     ) -> int:
         normalized_prefixes = tuple(
             prefix.casefold() for prefix in provider_prefixes if prefix
@@ -167,7 +165,6 @@ class QuotaStateStore:
         async with self._lock:
             state = self._load_state()
             self._prune_state(state)
-            now = time.time()
             changed = 0
             for quota_key, item in list(state["cooldowns"].items()):
                 if not isinstance(item, dict):
@@ -175,21 +172,9 @@ class QuotaStateStore:
                 provider_id = str(item.get("provider_id") or "")
                 if not provider_id.casefold().startswith(normalized_prefixes):
                     continue
-                if str(item.get("reason") or "").startswith("upstream_quota"):
+                if str(item.get("reason") or "") in preserve_reasons:
                     continue
-                if float(item.get("expires_at") or 0) <= now:
-                    state["cooldowns"].pop(quota_key, None)
-                    continue
-                updated = dict(item)
-                updated.update(
-                    {
-                        "window_id": window_id,
-                        "started_at": now,
-                        "expires_at": max(now, float(expires_at)),
-                        "reason": str(reason or "upstream_quota_migrated"),
-                    }
-                )
-                state["cooldowns"][quota_key] = updated
+                state["cooldowns"].pop(quota_key, None)
                 changed += 1
             self._save_state(state)
             return changed

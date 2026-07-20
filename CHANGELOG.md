@@ -1,11 +1,16 @@
 # Changelog
 
+## v0.9.1
+
+- 修正旧状态迁移：清除 opencode 由 110 万 token 阈值生成的 cooldown，不再将其延期到次日 11:00。
+- 仅保留上游实际返回 `FreeUsageLimitError` 后生成的模型级 cooldown；opencode 的 1 美元额度不通过本地 token 数推算。
+
 ## v0.9.0
 
 - 新增 `upstream_quota_provider_prefixes`，默认 `opencode-zen/` 不再使用火山 token 安全阈值。
 - 精确识别 opencode HTTP 429 `FreeUsageLimitError`，按具体模型持久冷却到下一个北京时间 11:00，不连坐其他 opencode 模型。
 - 增加可卸载的 Provider 调用 guard，普通 Agent、图片描述及其他直接调用同一 AstrBot Provider 的路径均能触发或遵守 cooldown。
-- 启动时把旧版当前有效的 opencode token cooldown 迁移为次日 11:00 到期，并在状态 API 与 Plugin Page 展示新策略。
+- 状态 API 与 Plugin Page 展示 opencode 上游额度策略与模型级 cooldown。
 
 ## v0.8.0
 
