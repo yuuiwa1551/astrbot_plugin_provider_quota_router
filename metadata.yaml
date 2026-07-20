@@ -1,7 +1,7 @@
 name: astrbot_plugin_provider_quota_router
-desc: 火山 provider 按日额度、冷却和 403 熔断自动路由，DeepSeek 自有 API 不限额。
+desc: 火山按日额度与 403 熔断路由，opencode 免费额度错误冷却，DeepSeek 自有 API 不限额。
 short_desc: Provider 日额度路由
-version: 0.8.0
+version: 0.9.0
 author: yuuiwa1551
 repo: "https://github.com/yuuiwa1551/astrbot_plugin_provider_quota_router"
 display_name: Provider 额度路由

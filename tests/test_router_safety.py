@@ -302,6 +302,55 @@ class RouterSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(decision.should_reserve)
         self.assertIn("openai/doubao", state.cooldowns)
 
+    async def test_opencode_ignores_token_threshold_but_respects_error_cooldown(self) -> None:
+        provider_id = "opencode-zen/mimo-v2.5-free"
+        providers = {
+            provider_id: make_provider(provider_id, ["text", "image"]),
+            "deepseek/deepseek-v4-flash": make_provider(
+                "deepseek/deepseek-v4-flash", ["text", "image"]
+            ),
+        }
+        state = FakeState()
+        router = ProviderQuotaRouter(
+            settings=RouterSettings(
+                default_daily_limit_tokens=100,
+                default_safety_buffer_tokens=0,
+                default_request_reservation_tokens=0,
+                chains=[ChainConfig(name="test", providers=list(providers))],
+            ),
+            ledger=MapLedger({provider_id: 9_999_999}),
+            state=state,
+            get_provider=providers.get,
+        )
+
+        available = await router.decide(
+            current_provider_id=provider_id,
+            window=SimpleNamespace(window_id="window-a"),
+        )
+        self.assertEqual(available.selected_provider_id, provider_id)
+        self.assertEqual(available.reason, "upstream_quota")
+        self.assertFalse(available.should_reserve)
+
+        state.cooldowns[provider_id] = {
+            "window_id": "window-a",
+            "quota_key": provider_id,
+            "provider_id": provider_id,
+            "provider_model": provider_id,
+            "started_at": time.time(),
+            "expires_at": time.time() + 3_600,
+            "reason": "upstream_quota_exhausted",
+        }
+        cooling = await router.decide(
+            current_provider_id=provider_id,
+            window=SimpleNamespace(window_id="window-a"),
+        )
+        self.assertEqual(
+            cooling.selected_provider_id, "deepseek/deepseek-v4-flash"
+        )
+        self.assertEqual(
+            cooling.candidates[0].reason, "upstream_quota_cooldown"
+        )
+
     async def test_cooldown_survives_new_window_until_24_hours_end(self) -> None:
         providers = {
             "openai/doubao": make_provider("openai/doubao", ["text"]),

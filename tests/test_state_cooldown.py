@@ -110,6 +110,46 @@ class StateCooldownTests(unittest.IsolatedAsyncioTestCase):
             after_reset = await reloaded.get_cooldown(quota_key="doubao-model")
             self.assertIsNotNone(after_reset)
 
+    async def test_upstream_quota_cooldown_uses_absolute_reset_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = QuotaStateStore(Path(temp_dir))
+            reset_at = 1_900_000_000.0
+            created = await store.set_cooldown_until(
+                quota_key="mimo-v2.5-free",
+                window_id="window-a",
+                provider_id="opencode-zen/mimo-v2.5-free",
+                provider_model="mimo-v2.5-free",
+                expires_at=reset_at,
+                reason="upstream_quota_exhausted",
+            )
+
+            self.assertEqual(created["expires_at"], reset_at)
+            self.assertEqual(created["reason"], "upstream_quota_exhausted")
+
+    async def test_rebases_old_opencode_token_cooldown_to_reset_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = QuotaStateStore(Path(temp_dir))
+            await store.start_cooldown(
+                quota_key="mimo-v2.5-free",
+                window_id="window-old",
+                provider_id="opencode-zen/mimo-v2.5-free",
+                provider_model="mimo-v2.5-free",
+                ttl_seconds=86_400,
+            )
+
+            changed = await store.rebase_cooldowns_for_provider_prefixes(
+                provider_prefixes=("opencode-zen/",),
+                window_id="window-new",
+                expires_at=1_900_000_000.0,
+                reason="upstream_quota_migrated",
+            )
+            cooldown = await store.get_cooldown(quota_key="mimo-v2.5-free")
+
+            self.assertEqual(changed, 1)
+            self.assertEqual(cooldown["window_id"], "window-new")
+            self.assertEqual(cooldown["expires_at"], 1_900_000_000.0)
+            self.assertEqual(cooldown["reason"], "upstream_quota_migrated")
+
 
 if __name__ == "__main__":
     unittest.main()

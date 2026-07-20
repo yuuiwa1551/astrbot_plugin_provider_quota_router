@@ -187,3 +187,9 @@ deepseek/deepseek-v4-pro
 目标：本插件接管的模型最终报错时，不在原群聊或私聊窗口展示技术错误；改为私聊 Bot 管理员，全部 Provider 错误共用一小时限频，同时确保最终 `role=err` 路径仍会触发火山 403 组级熔断。
 
 状态：v0.8.0 已完成并同步实时 Docker 环境，详见 `8期plan.md`。
+
+## 9期 opencode 免费额度错误冷却
+
+目标：`opencode-zen/` 免费模型不再套用火山 token 阈值；实际返回 `FreeUsageLimitError` 后，只冷却报错模型到下一个北京时间 11:00，并覆盖图片描述等直接 Provider 调用。
+
+状态：v0.9.0 已完成并同步实时 Docker 环境，详见 `9期plan.md`。

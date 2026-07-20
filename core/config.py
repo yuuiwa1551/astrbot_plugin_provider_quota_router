@@ -47,6 +47,7 @@ class RouterSettings:
     disable_astrbot_error_fallback: bool = False
     quota_cooldown_seconds: int = 86_400
     unlimited_provider_prefixes: tuple[str, ...] = ("deepseek/",)
+    upstream_quota_provider_prefixes: tuple[str, ...] = ("opencode-zen/",)
     volcengine_403_circuit_enabled: bool = True
     volcengine_provider_source_ids: tuple[str, ...] = ("openai",)
     volcengine_403_cooldown_seconds: int = 1_800
@@ -99,6 +100,10 @@ class RouterSettings:
             unlimited_provider_prefixes=_string_tuple(
                 raw.get("unlimited_provider_prefixes"), ("deepseek/",)
             ),
+            upstream_quota_provider_prefixes=_string_tuple(
+                raw.get("upstream_quota_provider_prefixes"),
+                ("opencode-zen/",),
+            ),
             volcengine_403_circuit_enabled=bool(
                 raw.get("volcengine_403_circuit_enabled", True)
             ),
@@ -142,6 +147,20 @@ class RouterSettings:
             normalized.startswith(prefix.casefold())
             for prefix in self.unlimited_provider_prefixes
             if prefix
+        )
+
+    def is_upstream_quota_provider(self, provider_id: str) -> bool:
+        normalized = str(provider_id or "").casefold()
+        return any(
+            normalized.startswith(prefix.casefold())
+            for prefix in self.upstream_quota_provider_prefixes
+            if prefix
+        )
+
+    def is_token_quota_managed(self, provider_id: str) -> bool:
+        return not (
+            self.is_unlimited_provider(provider_id)
+            or self.is_upstream_quota_provider(provider_id)
         )
 
     def is_volcengine_source(self, provider_source_id: str) -> bool:
@@ -221,6 +240,7 @@ def is_quota_only_exhaustion(reasons: list[str]) -> bool:
         in {
             "quota_exceeded",
             "cooldown_active",
+            "upstream_quota_cooldown",
             "provider_group_cooldown",
             "provider_group_probe",
         }

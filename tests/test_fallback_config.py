@@ -35,6 +35,21 @@ class FallbackConfigTests(unittest.TestCase):
             settings.provider_error_admin_notify_interval_seconds, 3_600
         )
         self.assertTrue(settings.provider_error_suppress_current_chat)
+        self.assertTrue(
+            settings.is_upstream_quota_provider(
+                "opencode-zen/mimo-v2.5-free"
+            )
+        )
+        self.assertFalse(
+            settings.is_token_quota_managed(
+                "opencode-zen/mimo-v2.5-free"
+            )
+        )
+        self.assertTrue(
+            settings.is_token_quota_managed(
+                "openai/doubao-seed-2-1-turbo-260628"
+            )
+        )
 
     def test_build_chain_deduplicates_default_provider(self) -> None:
         chain = build_astrbot_fallback_chain(

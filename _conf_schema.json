@@ -111,6 +111,12 @@
     "hint": "匹配这些前缀的 provider 不做额度判断、不预占 token。当前 DeepSeek 自有 API 使用 deepseek/。",
     "default": ["deepseek/"]
   },
+  "upstream_quota_provider_prefixes": {
+    "description": "按上游额度错误冷却的 Provider 前缀",
+    "type": "list",
+    "hint": "匹配这些前缀的模型不套用火山 token 阈值；返回 FreeUsageLimitError 后仅冷却该模型到下一个每日重置时间。当前 opencode 使用 opencode-zen/。",
+    "default": ["opencode-zen/"]
+  },
   "volcengine_403_circuit_enabled": {
     "description": "启用火山 403 组级熔断",
     "type": "bool",

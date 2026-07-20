@@ -61,6 +61,7 @@ def build_provider_error_alert(
     source_origin: str,
     circuit_retry_at: float | None,
     interval_seconds: int,
+    model_cooldown_until: float | None = None,
 ) -> str:
     lines = [
         "[ProviderQuotaRouter] Provider 调用失败",
@@ -75,6 +76,16 @@ def build_provider_error_alert(
             [
                 "处理：火山模型组已进入 30 分钟冷却，当前请求后续将使用非火山 fallback。",
                 f"下次探测：{retry_text}",
+            ]
+        )
+    elif model_cooldown_until:
+        retry_text = datetime.fromtimestamp(
+            float(model_cooldown_until)
+        ).astimezone().isoformat(timespec="seconds")
+        lines.extend(
+            [
+                "处理：该 opencode 免费模型已冷却，其他候选仍可继续使用。",
+                f"恢复时间：{retry_text}",
             ]
         )
     else:

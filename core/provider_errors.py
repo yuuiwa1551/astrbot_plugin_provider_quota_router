@@ -20,6 +20,7 @@ def is_provider_error_text(error_text: str) -> bool:
             "all chat models failed:",
             "providerapierror",
             "accountoverdueerror",
+            "freeusagelimiterror",
             "all available chat models are unavailable",
             "error occurred during ai execution.",
         )
@@ -43,3 +44,15 @@ def is_http_403_response(response: Any) -> bool:
     if not is_provider_error_response(response):
         return False
     return is_http_403_error_text(response_error_text(response))
+
+
+def is_upstream_free_quota_exhausted_text(error_text: str) -> bool:
+    normalized = str(error_text or "").casefold()
+    return any(
+        marker in normalized
+        for marker in (
+            "freeusagelimiterror",
+            "free usage limit error",
+            "free usage limit has been reached",
+        )
+    )
