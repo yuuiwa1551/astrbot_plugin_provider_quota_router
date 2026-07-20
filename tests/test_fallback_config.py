@@ -17,7 +17,7 @@ from core.fallback_config import (
 
 
 class FallbackConfigTests(unittest.TestCase):
-    def test_volcengine_safety_defaults_exempt_deepseek(self) -> None:
+    def test_only_volcengine_source_uses_token_quota(self) -> None:
         settings = RouterSettings.from_raw({})
 
         self.assertEqual(settings.reset_time, "11:00")
@@ -41,15 +41,11 @@ class FallbackConfigTests(unittest.TestCase):
             )
         )
         self.assertFalse(
-            settings.is_token_quota_managed(
-                "opencode-zen/mimo-v2.5-free"
-            )
+            settings.is_token_quota_managed("opencode-zen")
         )
-        self.assertTrue(
-            settings.is_token_quota_managed(
-                "openai/doubao-seed-2-1-turbo-260628"
-            )
-        )
+        self.assertTrue(settings.is_token_quota_managed("openai"))
+        self.assertFalse(settings.is_token_quota_managed("deepseek"))
+        self.assertFalse(settings.is_token_quota_managed("中转站1"))
 
     def test_build_chain_deduplicates_default_provider(self) -> None:
         chain = build_astrbot_fallback_chain(

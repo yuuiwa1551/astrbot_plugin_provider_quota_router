@@ -157,11 +157,9 @@ class RouterSettings:
             if prefix
         )
 
-    def is_token_quota_managed(self, provider_id: str) -> bool:
-        return not (
-            self.is_unlimited_provider(provider_id)
-            or self.is_upstream_quota_provider(provider_id)
-        )
+    def is_token_quota_managed(self, provider_source_id: str) -> bool:
+        """Only configured Volcengine provider sources use the local token cap."""
+        return self.is_volcengine_source(provider_source_id)
 
     def is_volcengine_source(self, provider_source_id: str) -> bool:
         normalized = str(provider_source_id or "").casefold()

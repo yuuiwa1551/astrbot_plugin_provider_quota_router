@@ -239,8 +239,8 @@ class RouterSafetyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_use_last_remains_available_for_quota_only_exhaustion(self) -> None:
         providers = {
-            "provider-a": make_provider("provider-a", ["text"]),
-            "provider-b": make_provider("provider-b", ["text"]),
+            "provider-a": make_provider("provider-a", ["text"], "openai"),
+            "provider-b": make_provider("provider-b", ["text"], "openai"),
         }
         settings = RouterSettings(
             default_daily_limit_tokens=100,
@@ -267,7 +267,9 @@ class RouterSafetyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_deepseek_prefix_is_unlimited_and_not_reserved(self) -> None:
         providers = {
-            "openai/doubao": make_provider("openai/doubao", ["text"]),
+            "openai/doubao": make_provider(
+                "openai/doubao", ["text"], "openai"
+            ),
             "deepseek/deepseek-v4-flash": make_provider(
                 "deepseek/deepseek-v4-flash", ["text"]
             ),
@@ -351,9 +353,41 @@ class RouterSafetyTests(unittest.IsolatedAsyncioTestCase):
             cooling.candidates[0].reason, "upstream_quota_cooldown"
         )
 
+    async def test_non_volcengine_provider_ignores_token_threshold(self) -> None:
+        provider_id = "中转站1/gpt-5.4"
+        providers = {
+            provider_id: make_provider(
+                provider_id, ["text", "image", "tool_use"], "中转站1"
+            ),
+        }
+        state = FakeState()
+        router = ProviderQuotaRouter(
+            settings=RouterSettings(
+                default_daily_limit_tokens=100,
+                default_safety_buffer_tokens=0,
+                default_request_reservation_tokens=0,
+                chains=[ChainConfig(name="test", providers=[provider_id])],
+            ),
+            ledger=MapLedger({provider_id: 9_999_999}),
+            state=state,
+            get_provider=providers.get,
+        )
+
+        decision = await router.decide(
+            current_provider_id=provider_id,
+            window=SimpleNamespace(window_id="window-a"),
+        )
+
+        self.assertEqual(decision.action, "allow")
+        self.assertEqual(decision.reason, "unlimited")
+        self.assertFalse(decision.should_reserve)
+        self.assertNotIn(provider_id, state.cooldowns)
+
     async def test_cooldown_survives_new_window_until_24_hours_end(self) -> None:
         providers = {
-            "openai/doubao": make_provider("openai/doubao", ["text"]),
+            "openai/doubao": make_provider(
+                "openai/doubao", ["text"], "openai"
+            ),
             "deepseek/deepseek-v4-flash": make_provider(
                 "deepseek/deepseek-v4-flash", ["text"]
             ),
@@ -395,7 +429,9 @@ class RouterSafetyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reconcile_starts_cooldown_without_a_followup_request(self) -> None:
         providers = {
-            "openai/doubao": make_provider("openai/doubao", ["text"]),
+            "openai/doubao": make_provider(
+                "openai/doubao", ["text"], "openai"
+            ),
             "deepseek/deepseek-v4-flash": make_provider(
                 "deepseek/deepseek-v4-flash", ["text"]
             ),

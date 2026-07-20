@@ -62,7 +62,7 @@ from .core.time_window import current_window, window_for_local_date
 
 
 PLUGIN_NAME = "astrbot_plugin_provider_quota_router"
-PLUGIN_VERSION = "0.9.1"
+PLUGIN_VERSION = "0.10.0"
 PLUGIN_REPOSITORY = "https://github.com/yuuiwa1551/astrbot_plugin_provider_quota_router"
 PLUGIN_DESCRIPTION = "按 provider/model 每日 token 额度自动降级路由 AstrBot 聊天模型。"
 HOOK_PRIORITY = 900
@@ -120,6 +120,7 @@ class ProviderQuotaRouterPlugin(Star):
         self.config = config or {}
         self._cmd_config_path = resolve_cmd_config_path(__file__)
         self._fallback_config_signature: ConfigFileSignature | None = None
+        self._fallback_reload_lock = asyncio.Lock()
         self._fallback_watch_task: asyncio.Task | None = None
         self._cooldown_reconcile_task: asyncio.Task | None = None
         self._volcengine_probe_task: asyncio.Task | None = None
@@ -165,7 +166,8 @@ class ProviderQuotaRouterPlugin(Star):
             name="provider-quota-router-volcengine-probe",
         )
         logger.info(
-            "[ProviderQuotaRouter] fallback watch started: active=%s path=%s interval=%ss",
+            "[ProviderQuotaRouter] fallback watch started: active=%s path=%s "
+            "interval=%ss request_check=true",
             self._fallback_chain_is_dynamic,
             self._cmd_config_path,
             self.settings.fallback_watch_interval_seconds,
@@ -635,14 +637,18 @@ class ProviderQuotaRouterPlugin(Star):
     async def _watch_fallback_config(self) -> None:
         while True:
             await asyncio.sleep(self.settings.fallback_watch_interval_seconds)
-            if not self._fallback_chain_is_dynamic:
-                continue
+            await self._refresh_fallback_config_if_changed()
+
+    async def _refresh_fallback_config_if_changed(self) -> bool:
+        if not self._fallback_chain_is_dynamic:
+            return False
+        async with self._fallback_reload_lock:
             try:
                 signature = await asyncio.to_thread(
                     file_signature, self._cmd_config_path
                 )
                 if signature == self._fallback_config_signature:
-                    continue
+                    return False
                 chain, loaded_signature = await asyncio.to_thread(
                     load_astrbot_fallback_chain, self._cmd_config_path
                 )
@@ -650,28 +656,31 @@ class ProviderQuotaRouterPlugin(Star):
                 raise
             except Exception as exc:  # noqa: BLE001
                 self._record_fallback_error(exc)
-                continue
-            self._apply_watched_fallback_chain(chain, loaded_signature)
+                return False
+            return self._apply_watched_fallback_chain(chain, loaded_signature)
 
     def _apply_watched_fallback_chain(
         self,
         chain: ChainConfig,
         signature: ConfigFileSignature,
-    ) -> None:
+    ) -> bool:
         old_providers = (
             self.settings.chains[0].providers if self.settings.chains else []
         )
-        self.settings = replace(self.settings, chains=[chain])
-        self.router = self._build_router()
         self._fallback_config_signature = signature
         self._fallback_chain_source = "cmd_config"
-        self._fallback_last_reload_at = datetime.now().astimezone().isoformat()
         self._fallback_last_error = None
+        if old_providers == chain.providers:
+            return False
+        self.settings = replace(self.settings, chains=[chain])
+        self.router = self._build_router()
+        self._fallback_last_reload_at = datetime.now().astimezone().isoformat()
         logger.info(
             "[ProviderQuotaRouter] fallback chain hot-reloaded: old=%s new=%s",
             old_providers,
             chain.providers,
         )
+        return True
 
     def _record_fallback_error(self, exc: Exception) -> None:
         message = f"{type(exc).__name__}: {exc}"
@@ -686,6 +695,7 @@ class ProviderQuotaRouterPlugin(Star):
     async def on_waiting_llm_request(self, event: AstrMessageEvent) -> None:
         if not self.settings.enabled:
             return
+        await self._refresh_fallback_config_if_changed()
         current_provider_id = self._current_provider_id(event)
         if not current_provider_id:
             return
@@ -1239,6 +1249,9 @@ class ProviderQuotaRouterPlugin(Star):
             "core_fallback_guard_active": self._core_fallback_guard_active,
             "opencode_quota_guard_active": self._opencode_quota_guard_active,
             "fallback_watch_active": self._fallback_chain_is_dynamic,
+            "fallback_request_check_active": (
+                self.settings.enabled and self._fallback_chain_is_dynamic
+            ),
             "fallback_config_path": str(self._cmd_config_path),
             "fallback_chain_source": self._fallback_chain_source,
             "fallback_last_reload_at": self._fallback_last_reload_at,

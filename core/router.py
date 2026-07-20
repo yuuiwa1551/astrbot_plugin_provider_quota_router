@@ -96,7 +96,7 @@ class ProviderQuotaRouter:
                 continue
             provider_model = str(provider.get_model() or provider.provider_config.get("model") or "")
             quota_key = self._quota_key(provider_id, provider_model)
-            quota_managed = self.settings.is_token_quota_managed(provider_id)
+            quota_managed = self.is_token_quota_managed(provider_id)
             if group_circuit and self.is_volcengine_provider(provider_id):
                 usage = await self._usage(quota_key, window)
                 group_status = str(group_circuit.get("status") or "open")
@@ -293,7 +293,7 @@ class ProviderQuotaRouter:
                     provider_model = str(provider.get_model() or provider.provider_config.get("model") or "")
                 quota_key = self._quota_key(provider_id, provider_model)
                 usage = await self._usage(quota_key, window)
-                quota_managed = self.settings.is_token_quota_managed(provider_id)
+                quota_managed = self.is_token_quota_managed(provider_id)
                 limit = chain.limit(self.settings.default_daily_limit_tokens) if quota_managed else 0
                 safety = chain.safety_buffer(self.settings.default_safety_buffer_tokens) if quota_managed else 0
                 reservation = chain.reservation(self.settings.default_request_reservation_tokens) if quota_managed else 0
@@ -386,6 +386,9 @@ class ProviderQuotaRouter:
             str(provider.provider_config.get("provider_source_id") or "")
         )
 
+    def is_token_quota_managed(self, provider_id: str) -> bool:
+        return self.is_volcengine_provider(provider_id)
+
     async def volcengine_probe_candidate_ids(
         self, *, window: UsageWindow
     ) -> list[str]:
@@ -402,9 +405,6 @@ class ProviderQuotaRouter:
                 if not self.is_volcengine_provider(provider_id):
                     continue
                 if not self._supports_modalities(provider, {"text"}):
-                    continue
-                if not self.settings.is_token_quota_managed(provider_id):
-                    result.append(provider_id)
                     continue
                 provider_model = str(
                     provider.get_model()
@@ -440,7 +440,7 @@ class ProviderQuotaRouter:
         provider_model: str,
         window: UsageWindow,
     ) -> dict[str, Any] | None:
-        if self.settings.dry_run or not self.settings.is_token_quota_managed(provider_id):
+        if self.settings.dry_run or not self.is_token_quota_managed(provider_id):
             return None
         chain, _ = self._find_chain(provider_id)
         if chain is None:
@@ -475,7 +475,7 @@ class ProviderQuotaRouter:
         active_count = 0
         for chain in self.settings.chains:
             for provider_id in chain.providers:
-                if not self.settings.is_token_quota_managed(provider_id):
+                if not self.is_token_quota_managed(provider_id):
                     continue
                 provider = self.get_provider(provider_id)
                 if not isinstance(provider, Provider):
@@ -531,7 +531,7 @@ class ProviderQuotaRouter:
         reason: str,
     ) -> CandidateState:
         quota_key = provider_id
-        quota_managed = self.settings.is_token_quota_managed(provider_id)
+        quota_managed = self.is_token_quota_managed(provider_id)
         return CandidateState(
             provider_id=provider_id,
             provider_model="",

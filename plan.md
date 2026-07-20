@@ -193,3 +193,9 @@ deepseek/deepseek-v4-pro
 目标：`opencode-zen/` 免费模型不再套用火山 token 阈值；实际返回 `FreeUsageLimitError` 后，只冷却报错模型到下一个北京时间 11:00，并覆盖图片描述等直接 Provider 调用。
 
 状态：v0.9.1 已修正旧 token cooldown 迁移，opencode 只以上游 1 美元额度错误为准，详见 `9期plan.md`。
+
+## 10期 火山专属 token 上限与请求前 fallback 热加载
+
+目标：本地 token 阈值只约束火山 Provider Source；所有其他 Provider 不受 110 万限制。`cmd_config.json` 的 fallback 变化在下一条 LLM 请求前即时生效，同时保留 300 秒后台兜底。
+
+状态：v0.10.0 已完成并同步实时 Docker 环境，详见 `10期plan.md`。

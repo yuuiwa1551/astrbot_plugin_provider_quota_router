@@ -20,19 +20,19 @@
   "default_daily_limit_tokens": {
     "description": "默认每日额度",
     "type": "int",
-    "hint": "单位 token。火山活动当前可配置为 2000000，但不要依赖硬编码。",
+    "hint": "仅作用于 volcengine_provider_source_ids 指定的火山模型。单位 token。",
     "default": 2000000
   },
   "default_safety_buffer_tokens": {
     "description": "安全余量",
     "type": "int",
-    "hint": "判断是否可用时会预留这些 token，降低实际越线概率。",
+    "hint": "仅火山模型使用；判断是否可用时会预留这些 token，降低实际越线概率。",
     "default": 100000
   },
   "default_request_reservation_tokens": {
     "description": "单请求预占 token",
     "type": "int",
-    "hint": "请求发出前无法知道真实 usage，因此先按该值预占。",
+    "hint": "仅火山模型使用；请求发出前无法知道真实 usage，因此先按该值预占。",
     "default": 50000
   },
   "reservation_ttl_seconds": {
@@ -84,7 +84,7 @@
   "fallback_watch_interval_seconds": {
     "description": "AstrBot fallback 检查间隔",
     "type": "int",
-    "hint": "仅在使用 AstrBot 默认 fallback 链时生效。每隔多少秒检查 cmd_config.json，默认 5 分钟。",
+    "hint": "每次 LLM 请求前检查文件签名并即时更新；这里配置无请求时的后台兜底检查间隔，默认 5 分钟。",
     "default": 300
   },
   "strict_priority_order": {
@@ -108,7 +108,7 @@
   "unlimited_provider_prefixes": {
     "description": "不限额 Provider ID 前缀",
     "type": "list",
-    "hint": "匹配这些前缀的 provider 不做额度判断、不预占 token。当前 DeepSeek 自有 API 使用 deepseek/。",
+    "hint": "兼容配置。额度上限只由 volcengine_provider_source_ids 决定，所有非火山 Provider 均不按 token 限制。",
     "default": ["deepseek/"]
   },
   "upstream_quota_provider_prefixes": {

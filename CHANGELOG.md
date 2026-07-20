@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.10.0
+
+- 将本地 token 上限严格限定到 `volcengine_provider_source_ids` 对应的火山 Provider Source；中转站、DeepSeek、opencode 及其他非火山模型均不套用 110 万阈值。
+- 每次 LLM 请求前只检查一次 `cmd_config.json` 文件签名，fallback 变化时立即热加载；300 秒后台监视保留为无请求时兜底。
+- fallback 内容未变化时只更新文件签名，不再重复重建 router 或打印误导性的热加载日志。
+
 ## v0.9.1
 
 - 修正旧状态迁移：清除 opencode 由 110 万 token 阈值生成的 cooldown，不再将其延期到次日 11:00。
