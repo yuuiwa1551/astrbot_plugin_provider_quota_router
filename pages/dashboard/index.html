@@ -239,6 +239,9 @@
       }
 
       .badge.exhausted,
+      .badge.cooldown,
+      .badge.provider_group_cooldown,
+      .badge.provider_group_probe,
       .badge.critical {
         background: var(--soft-red);
         color: var(--red);
@@ -853,7 +856,7 @@
         els.windowLabel.textContent =
           `${formatDateTime(windowInfo.start_local)} -> ${formatDateTime(windowInfo.end_local)}`;
         els.modeLabel.textContent =
-          `quota_key_mode=${settings.quota_key_mode || "-"} · action=${settings.exhausted_action || "-"} · priority=${settings.strict_priority_order ? "strict" : "session"} · core_fallback=${settings.core_fallback_guard_active ? "blocked" : "on"} · reset=${settings.reset_time || "-"} · fallback=${settings.fallback_chain_source || "-"} · watch=${watchState}`;
+          `quota_key_mode=${settings.quota_key_mode || "-"} · action=${settings.exhausted_action || "-"} · priority=${settings.strict_priority_order ? "strict" : "session"} · cooldown=${settings.quota_cooldown_seconds || 0}s · core_fallback=${settings.core_fallback_guard_active ? "blocked" : "on"} · reset=${settings.reset_time || "-"} · fallback=${settings.fallback_chain_source || "-"} · watch=${watchState}`;
         els.modeLabel.title = settings.fallback_last_error
           || `config=${settings.fallback_config_path || "-"} · last_reload=${settings.fallback_last_reload_at || "-"}`;
         els.dryRunBadge.textContent = settings.dry_run ? "dry-run" : "active";
@@ -885,18 +888,30 @@
           .map((row) => {
             const limit = Number(row.limit || 0);
             const used = Number(row.effective_tokens || 0);
-            const percent = limit > 0 ? Math.min(100, (used / limit) * 100) : 100;
+            const managed = row.quota_managed !== false;
+            const percent = managed && limit > 0 ? Math.min(100, (used / limit) * 100) : 0;
             const severity =
               percent >= 100 ? "critical" : percent >= 90 ? "warning" : "";
-            const statusClass = row.status === "exhausted" ? "badge exhausted" : "badge";
+            const statusClass = ["exhausted", "cooldown", "provider_group_cooldown", "provider_group_probe"].includes(row.status)
+              ? `badge ${row.status}`
+              : "badge";
+            const limitText = managed ? formatTokens(limit) : "unlimited";
+            const cooldownText = row.cooldown_until
+              ? `<div class="muted">cooldown until ${escapeHtml(new Date(Number(row.cooldown_until) * 1000).toLocaleString())}</div>`
+              : "";
+            const groupText = row.provider_group_retry_at
+              ? `<div class="muted">${escapeHtml(row.provider_group || "group")} retry at ${escapeHtml(new Date(Number(row.provider_group_retry_at) * 1000).toLocaleString())}</div>`
+              : "";
             return `
               <tr>
                 <td class="provider-cell">${escapeHtml(row.provider_id || "-")}<div class="muted">${escapeHtml(row.chain || "-")}</div></td>
                 <td>${escapeHtml(row.provider_model || "-")}</td>
                 <td>${escapeHtml(row.quota_key || "-")}</td>
                 <td>
-                  <div>${formatTokens(used)} / ${formatTokens(limit)}</div>
+                  <div>${formatTokens(used)} / ${limitText}</div>
                   <div class="muted">db=${formatTokens(row.db_tokens)} overlay=${formatTokens(row.overlay_tokens)}</div>
+                  ${cooldownText}
+                  ${groupText}
                   <div class="progress-track"><div class="progress-bar ${severity}" style="width:${percent}%"></div></div>
                 </td>
                 <td><span class="${statusClass}">${escapeHtml(row.status || "-")}</span></td>
@@ -928,15 +943,34 @@
       function renderRuntime(runtime) {
         const pending = runtime.pending || [];
         const overlays = runtime.overlays || [];
+        const cooldowns = runtime.cooldowns || [];
+        const circuits = runtime.provider_group_circuits || [];
         const details = [
           `pending: ${runtime.pending_count || 0}`,
           `overlay: ${runtime.overlay_count || 0}`,
+          `cooldown: ${runtime.cooldown_count || 0}`,
+          `provider group circuit: ${runtime.provider_group_circuit_count || 0}`,
         ];
         if (pending[0]) {
           details.push(`first pending: ${pending[0].provider_id || "-"} ${formatTokens(pending[0].tokens)}`);
         }
         if (overlays[0]) {
           details.push(`last overlay: ${overlays[0].provider_id || "-"} ${formatTokens(overlays[0].tokens)}`);
+        }
+        if (cooldowns[0]) {
+          details.push(`cooldown: ${cooldowns[0].provider_id || "-"} until ${new Date(Number(cooldowns[0].expires_at) * 1000).toLocaleString()}`);
+        }
+        if (circuits[0]) {
+          const circuit = circuits[0];
+          details.push(`${circuit.group_id || "provider group"}: ${circuit.status || "open"}`);
+          details.push(`trigger: ${circuit.trigger_provider_id || "-"}`);
+          details.push(`retry at: ${new Date(Number(circuit.retry_at) * 1000).toLocaleString()}`);
+          if (circuit.probe_provider_id) {
+            details.push(`probe: ${circuit.probe_provider_id}`);
+          }
+          if (circuit.last_error) {
+            details.push(`last error: ${circuit.last_error}`);
+          }
         }
         els.runtimeList.innerHTML = `
           <div class="list-item">

@@ -17,6 +17,20 @@ from core.fallback_config import (
 
 
 class FallbackConfigTests(unittest.TestCase):
+    def test_volcengine_safety_defaults_exempt_deepseek(self) -> None:
+        settings = RouterSettings.from_raw({})
+
+        self.assertEqual(settings.reset_time, "11:00")
+        self.assertEqual(settings.quota_cooldown_seconds, 86_400)
+        self.assertTrue(settings.is_unlimited_provider("deepseek/deepseek-v4-pro"))
+        self.assertFalse(
+            settings.is_unlimited_provider("openai/deepseek-v4-pro-260425")
+        )
+        self.assertTrue(settings.volcengine_403_circuit_enabled)
+        self.assertTrue(settings.is_volcengine_source("openai"))
+        self.assertEqual(settings.volcengine_403_cooldown_seconds, 1_800)
+        self.assertEqual(settings.volcengine_probe_check_interval_seconds, 30)
+
     def test_build_chain_deduplicates_default_provider(self) -> None:
         chain = build_astrbot_fallback_chain(
             {

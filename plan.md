@@ -4,12 +4,15 @@
 
 新建独立插件 `astrbot_plugin_provider_quota_router`，负责全局 provider/model 日额度路由。插件不修改 AstrBot 核心，不改 `cmd_config.json` 默认 provider，不合并到现有第三方 `astrbot_plugin_token_controller`。
 
-实施按四期推进：
+实施按七期推进：
 
 - 1期：命令行可管理的 MVP，先做到稳定路由和可验证统计。
 - 2期：Plugin Page、报表、告警和更细计费口径。
 - 3期：在 Plugin Page 增加历史 token 图表，覆盖每日模型消耗、单日占比和单模型趋势。
 - 4期：修复 AstrBot fallback 链热更新与不安全的 `use_last` 降级行为。
+- 5期：严格按 fallback 全局优先级路由，并可隔离 AstrBot 核心错误 fallback。
+- 6期：只限制火山 provider，DeepSeek 不限额；增加跨 11:00 窗口的 24 小时冷却。
+- 7期：火山 403 组级熔断 30 分钟，到期后台随机半开探测并自动恢复。
 
 ## 技术决策
 
@@ -150,3 +153,30 @@ deepseek/deepseek-v4-pro
 ```
 
 注意：如果额度是按“单一模型”而不是 provider ID 计算，应优先以 `provider_model` 作为 quota key。
+
+## 6期火山额度冷却与 DeepSeek 不限额
+
+目标：火山模型继续按 200 万额度和 11:00 日窗口路由；达到阈值后持久冷却 24 小时。`deepseek/` 自有 API 始终作为不限额候选，不因本插件统计用量而停用。
+
+状态：v0.6.0 已完成并同步实时 Docker 环境，详见 `6期plan.md`。
+
+交付：
+
+- `unlimited_provider_prefixes=["deepseek/"]` 将 DeepSeek 自有 API 排除在额度判断外。
+- `quota_cooldown_seconds=86400` 保存火山模型达线后的冷却时间。
+- 恢复必须同时满足：当前 11:00 日窗口已经更新，且 24 小时冷却已经结束。
+- `quota_state.json` 持久化 cooldown；普通 cache reset 不删除费用保护状态。
+
+## 7期火山 403 组级熔断与半开探测
+
+目标：火山任一模型返回 403 时整组熔断 30 分钟，避免欠费或权限异常期间逐个撞击火山模型；冷却到期后后台随机探测一个仍在 token 安全线内的火山模型，成功恢复整组，失败继续使用非火山 fallback。
+
+状态：v0.7.0 已完成，详见 `7期plan.md`。
+
+交付：
+
+- 按 provider source ID 识别火山模型组。
+- 持久化 403 组级熔断、最近错误、下次探测与探测租约。
+- 熔断期间跳过全部火山候选，继续扫描非火山模型。
+- 后台半开探测成功恢复、失败续期 30 分钟。
+- 状态 API 和 Plugin Page 展示熔断与探测状态。

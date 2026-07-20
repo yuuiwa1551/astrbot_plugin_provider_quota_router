@@ -14,8 +14,8 @@
   "reset_time": {
     "description": "每日额度重置时间",
     "type": "string",
-    "hint": "格式 HH:MM，例如 00:00 或 04:30。",
-    "default": "00:00"
+    "hint": "格式 HH:MM。当前火山资源包业务按北京时间 11:00 切换日窗口。",
+    "default": "11:00"
   },
   "default_daily_limit_tokens": {
     "description": "默认每日额度",
@@ -98,6 +98,48 @@
     "type": "bool",
     "hint": "开启后，本插件接管的请求只会因额度决策换模型；403、超时等 provider 错误不会再绕过额度判断进入后续模型。",
     "default": false
+  },
+  "quota_cooldown_seconds": {
+    "description": "达到阈值后的冷却秒数",
+    "type": "int",
+    "hint": "火山模型达到额度阈值后持续跳过的时间。默认 86400 秒；即使 11:00 已进入新窗口，也要等冷却结束。",
+    "default": 86400
+  },
+  "unlimited_provider_prefixes": {
+    "description": "不限额 Provider ID 前缀",
+    "type": "list",
+    "hint": "匹配这些前缀的 provider 不做额度判断、不预占 token。当前 DeepSeek 自有 API 使用 deepseek/。",
+    "default": ["deepseek/"]
+  },
+  "volcengine_403_circuit_enabled": {
+    "description": "启用火山 403 组级熔断",
+    "type": "bool",
+    "hint": "任一火山模型返回 HTTP 403 后，临时跳过同一 provider source 下的全部火山模型。",
+    "default": true
+  },
+  "volcengine_provider_source_ids": {
+    "description": "火山 Provider Source ID",
+    "type": "list",
+    "hint": "用于识别同一火山账号下的模型组。本机火山模型当前使用 provider_source_id=openai。",
+    "default": ["openai"]
+  },
+  "volcengine_403_cooldown_seconds": {
+    "description": "火山 403 熔断秒数",
+    "type": "int",
+    "hint": "403 后整组火山模型的冷却时间，默认 1800 秒（30 分钟）。",
+    "default": 1800
+  },
+  "volcengine_probe_check_interval_seconds": {
+    "description": "火山恢复探测检查间隔",
+    "type": "int",
+    "hint": "后台多久检查一次是否到达半开探测时间，默认 30 秒。",
+    "default": 30
+  },
+  "volcengine_probe_timeout_seconds": {
+    "description": "火山恢复探测超时",
+    "type": "int",
+    "hint": "随机火山模型最小探测请求的最大等待时间，默认 30 秒。",
+    "default": 30
   },
   "chains_json": {
     "description": "自定义路由链 JSON",

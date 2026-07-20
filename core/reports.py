@@ -15,6 +15,8 @@ def build_alerts(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     chain_status: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         chain_status.setdefault(str(row.get("chain") or ""), []).append(row)
+        if not bool(row.get("quota_managed", True)):
+            continue
         limit = int(row.get("limit") or 0)
         used = int(row.get("effective_tokens") or 0)
         if limit <= 0:
@@ -47,7 +49,16 @@ def build_alerts(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             alerts.append(_usage_alert(row, ratio, "notice"))
 
     for chain, chain_rows in chain_status.items():
-        if chain_rows and all(row.get("status") == "exhausted" for row in chain_rows):
+        if chain_rows and all(
+            row.get("status")
+            in {
+                "exhausted",
+                "cooldown",
+                "provider_group_cooldown",
+                "provider_group_probe",
+            }
+            for row in chain_rows
+        ):
             alerts.append(
                 {
                     "level": "critical",
@@ -74,7 +85,17 @@ def _usage_alert(row: dict[str, Any], ratio: float, level: str) -> dict[str, Any
 def build_summary(rows: list[dict[str, Any]], alerts: list[dict[str, Any]]) -> dict[str, Any]:
     total_limit = sum(int(row.get("limit") or 0) for row in rows)
     total_used = sum(int(row.get("effective_tokens") or 0) for row in rows)
-    exhausted_count = sum(1 for row in rows if row.get("status") == "exhausted")
+    exhausted_count = sum(
+        1
+        for row in rows
+        if row.get("status")
+        in {
+            "exhausted",
+            "cooldown",
+            "provider_group_cooldown",
+            "provider_group_probe",
+        }
+    )
     return {
         "provider_count": len(rows),
         "exhausted_count": exhausted_count,
@@ -141,6 +162,9 @@ def export_usage_csv(rows: list[dict[str, Any]], window: UsageWindow) -> str:
             "effective_tokens",
             "limit",
             "safety_buffer",
+            "quota_managed",
+            "cooldown_started_at",
+            "cooldown_until",
         ],
         lineterminator="\n",
     )
@@ -161,6 +185,9 @@ def export_usage_csv(rows: list[dict[str, Any]], window: UsageWindow) -> str:
                 "effective_tokens": row.get("effective_tokens", 0),
                 "limit": row.get("limit", 0),
                 "safety_buffer": row.get("safety_buffer", 0),
+                "quota_managed": row.get("quota_managed", True),
+                "cooldown_started_at": row.get("cooldown_started_at", ""),
+                "cooldown_until": row.get("cooldown_until", ""),
             }
         )
     return output.getvalue()

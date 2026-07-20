@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.7.0
+
+- 任一火山模型返回 HTTP 403 / `AccountOverdueError` 后，持久化整组火山熔断并跳过全部火山候选，默认冷却 30 分钟。
+- 熔断期间继续路由到非火山 fallback；冷却到期后，后台随机挑选仍处于单模型 token 安全线内的火山文本模型做最小探测。
+- 探测成功才恢复整组；失败、超时或无可用探测候选时继续保持保护状态，用户请求不会被用作恢复探针。
+- 状态 API 和 Plugin Page 增加火山组级熔断、最近错误、下次探测和探测模型信息。
+
+## v0.6.0
+
+- 每日额度窗口默认调整为北京时间 11:00。
+- 新增 `quota_cooldown_seconds`；受控模型达到阈值后默认持久冷却 24 小时，跨 11:00 新窗口和插件重启仍有效。
+- provider manager 就绪后执行延迟启动对账，并在受控模型响应结束后再次检查阈值，避免在 11:00 前最后一条请求跨线时漏建 cooldown。
+- 新增 `unlimited_provider_prefixes`，默认 `deepseek/` 自有 API 不参与额度判断、reservation 或 cooldown。
+- `/quota reset-cache` 保留费用保护冷却，避免管理操作意外解锁火山模型。
+- 状态 API、Plugin Page、CSV 与路由决策日志增加 unlimited/cooldown 信息。
+
 ## v0.5.0
 
 - 增加 `strict_priority_order`，默认每次从 fallback 链首严格按顺序检查，避免会话当前 provider 导致前置模型被跳过。

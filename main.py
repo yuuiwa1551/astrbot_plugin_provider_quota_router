@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
 import time
+import uuid
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -35,6 +37,7 @@ from .core.fallback_config import (
     resolve_cmd_config_path,
 )
 from .core.ledger import QuotaLedger
+from .core.provider_errors import is_http_403_response, response_error_text
 from .core.reports import (
     build_alerts,
     build_summary,
@@ -42,13 +45,13 @@ from .core.reports import (
     read_recent_decisions,
     write_snapshot,
 )
-from .core.router import ProviderQuotaRouter, decision_payload
+from .core.router import VOLCENGINE_GROUP_ID, ProviderQuotaRouter, decision_payload
 from .core.state import QuotaStateStore
 from .core.time_window import current_window, window_for_local_date
 
 
 PLUGIN_NAME = "astrbot_plugin_provider_quota_router"
-PLUGIN_VERSION = "0.5.0"
+PLUGIN_VERSION = "0.7.0"
 PLUGIN_REPOSITORY = "https://github.com/yuuiwa1551/astrbot_plugin_provider_quota_router"
 PLUGIN_DESCRIPTION = "按 provider/model 每日 token 额度自动降级路由 AstrBot 聊天模型。"
 HOOK_PRIORITY = 900
@@ -70,6 +73,13 @@ CONFIG_KEYS = {
     "fallback_watch_interval_seconds",
     "strict_priority_order",
     "disable_astrbot_error_fallback",
+    "quota_cooldown_seconds",
+    "unlimited_provider_prefixes",
+    "volcengine_403_circuit_enabled",
+    "volcengine_provider_source_ids",
+    "volcengine_403_cooldown_seconds",
+    "volcengine_probe_check_interval_seconds",
+    "volcengine_probe_timeout_seconds",
     "allow_status_for_all",
     "admin_user_ids",
     "exhausted_message",
@@ -96,6 +106,8 @@ class ProviderQuotaRouterPlugin(Star):
         self._cmd_config_path = resolve_cmd_config_path(__file__)
         self._fallback_config_signature: ConfigFileSignature | None = None
         self._fallback_watch_task: asyncio.Task | None = None
+        self._cooldown_reconcile_task: asyncio.Task | None = None
+        self._volcengine_probe_task: asyncio.Task | None = None
         self._fallback_chain_is_dynamic = False
         self._fallback_chain_source = "none"
         self._fallback_last_reload_at: str | None = None
@@ -122,9 +134,17 @@ class ProviderQuotaRouterPlugin(Star):
 
     async def initialize(self) -> None:
         self._sync_core_fallback_guard()
+        self._cooldown_reconcile_task = asyncio.create_task(
+            self._reconcile_cooldowns_after_startup(),
+            name="provider-quota-router-cooldown-reconcile",
+        )
         self._fallback_watch_task = asyncio.create_task(
             self._watch_fallback_config(),
             name="provider-quota-router-fallback-watch",
+        )
+        self._volcengine_probe_task = asyncio.create_task(
+            self._watch_volcengine_circuit(),
+            name="provider-quota-router-volcengine-probe",
         )
         logger.info(
             "[ProviderQuotaRouter] fallback watch started: active=%s path=%s interval=%ss",
@@ -142,8 +162,163 @@ class ProviderQuotaRouterPlugin(Star):
                 await task
             except asyncio.CancelledError:
                 pass
+        reconcile_task = self._cooldown_reconcile_task
+        self._cooldown_reconcile_task = None
+        if reconcile_task and not reconcile_task.done():
+            reconcile_task.cancel()
+            try:
+                await reconcile_task
+            except asyncio.CancelledError:
+                pass
+        probe_task = self._volcengine_probe_task
+        self._volcengine_probe_task = None
+        if probe_task and not probe_task.done():
+            probe_task.cancel()
+            try:
+                await probe_task
+            except asyncio.CancelledError:
+                pass
         self._disable_core_fallback_guard()
         logger.info("[ProviderQuotaRouter] fallback watch stopped")
+
+    async def _watch_volcengine_circuit(self) -> None:
+        while True:
+            await asyncio.sleep(
+                self.settings.volcengine_probe_check_interval_seconds
+            )
+            if (
+                not self.settings.enabled
+                or not self.settings.volcengine_403_circuit_enabled
+                or self.settings.dry_run
+            ):
+                continue
+            try:
+                await self._probe_volcengine_if_due()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[ProviderQuotaRouter] Volcengine circuit probe loop failed: %s",
+                    exc,
+                )
+
+    async def _probe_volcengine_if_due(self) -> None:
+        circuit = await self.state.get_provider_group_circuit(
+            group_id=VOLCENGINE_GROUP_ID
+        )
+        if not circuit or float(circuit.get("retry_at") or 0) > time.time():
+            return
+        if (
+            circuit.get("status") == "probing"
+            and float(circuit.get("probe_lease_until") or 0) > time.time()
+        ):
+            return
+
+        window = current_window(
+            timezone_name=self.settings.timezone,
+            reset_time=self.settings.reset_time,
+        )
+        candidates = await self.router.volcengine_probe_candidate_ids(window=window)
+        if not candidates:
+            await self.state.defer_provider_group_probe(
+                group_id=VOLCENGINE_GROUP_ID,
+                delay_seconds=max(
+                    300, self.settings.volcengine_probe_check_interval_seconds
+                ),
+                error="没有仍处于 token 安全线内的火山探测候选",
+            )
+            logger.warning(
+                "[ProviderQuotaRouter] Volcengine probe deferred: no quota-safe candidates"
+            )
+            return
+
+        provider_id = secrets.choice(candidates)
+        lease = await self.state.acquire_provider_group_probe(
+            group_id=VOLCENGINE_GROUP_ID,
+            provider_id=provider_id,
+            lease_seconds=self.settings.volcengine_probe_timeout_seconds + 15,
+        )
+        if not lease:
+            return
+        provider = self.context.get_provider_by_id(provider_id)
+        if provider is None:
+            await self.state.finish_provider_group_probe(
+                group_id=VOLCENGINE_GROUP_ID,
+                success=False,
+                cooldown_seconds=self.settings.volcengine_403_cooldown_seconds,
+                error=f"探测 Provider 不存在: {provider_id}",
+            )
+            return
+
+        logger.warning(
+            "[ProviderQuotaRouter] Volcengine half-open probe started: provider=%s",
+            provider_id,
+        )
+        try:
+            response = await asyncio.wait_for(
+                provider.text_chat(
+                    prompt="连接测试：请只回复 OK。",
+                    session_id=f"provider-quota-probe-{uuid.uuid4().hex}",
+                    request_max_retries=1,
+                ),
+                timeout=self.settings.volcengine_probe_timeout_seconds,
+            )
+            if getattr(response, "role", "") == "err":
+                raise RuntimeError(
+                    str(getattr(response, "completion_text", "") or "模型返回错误")
+                )
+        except Exception as exc:  # noqa: BLE001
+            await self.state.finish_provider_group_probe(
+                group_id=VOLCENGINE_GROUP_ID,
+                success=False,
+                cooldown_seconds=self.settings.volcengine_403_cooldown_seconds,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            logger.warning(
+                "[ProviderQuotaRouter] Volcengine half-open probe failed; circuit reopened: provider=%s error=%s",
+                provider_id,
+                exc,
+            )
+            return
+
+        await self.state.finish_provider_group_probe(
+            group_id=VOLCENGINE_GROUP_ID,
+            success=True,
+            cooldown_seconds=self.settings.volcengine_403_cooldown_seconds,
+        )
+        logger.warning(
+            "[ProviderQuotaRouter] Volcengine half-open probe succeeded; circuit closed: provider=%s",
+            provider_id,
+        )
+
+    async def _reconcile_cooldowns_after_startup(self) -> None:
+        for delay_seconds in (10, 20, 30):
+            await asyncio.sleep(delay_seconds)
+            try:
+                checked_count, cooldown_count = await self.router.reconcile_cooldowns(
+                    window=current_window(
+                        timezone_name=self.settings.timezone,
+                        reset_time=self.settings.reset_time,
+                    )
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[ProviderQuotaRouter] startup cooldown reconciliation failed; retrying: %s",
+                    exc,
+                )
+                continue
+            if checked_count:
+                logger.info(
+                    "[ProviderQuotaRouter] startup cooldown reconciliation complete: checked=%s active=%s",
+                    checked_count,
+                    cooldown_count,
+                )
+                return
+        logger.warning(
+            "[ProviderQuotaRouter] startup cooldown reconciliation skipped: no managed providers became available"
+        )
 
     def _sync_core_fallback_guard(self) -> None:
         should_enable = (
@@ -448,6 +623,29 @@ class ProviderQuotaRouterPlugin(Star):
             actual_tokens=actual_tokens,
             overlay_ttl_seconds=self.settings.overlay_ttl_seconds,
         )
+        if (
+            pending
+            and self.settings.volcengine_403_circuit_enabled
+            and not self.settings.dry_run
+            and self.router.is_volcengine_provider(
+                str(pending.get("provider_id") or "")
+            )
+            and is_http_403_response(response)
+        ):
+            error_text = response_error_text(response)
+            circuit = await self.state.open_provider_group_circuit(
+                group_id=VOLCENGINE_GROUP_ID,
+                trigger_provider_id=str(pending.get("provider_id") or ""),
+                ttl_seconds=self.settings.volcengine_403_cooldown_seconds,
+                error=error_text,
+            )
+            logger.error(
+                "[ProviderQuotaRouter] Volcengine HTTP 403 circuit opened: provider=%s retry_at=%s",
+                pending.get("provider_id"),
+                datetime.fromtimestamp(
+                    float(circuit.get("retry_at") or 0)
+                ).astimezone().isoformat(timespec="seconds"),
+            )
         if pending and actual_tokens:
             logger.info(
                 "[ProviderQuotaRouter] usage recorded: provider=%s quota_key=%s tokens=%s",
@@ -455,6 +653,24 @@ class ProviderQuotaRouterPlugin(Star):
                 pending.get("quota_key"),
                 actual_tokens,
             )
+        if pending:
+            cooldown = await self.router.ensure_cooldown(
+                provider_id=str(pending.get("provider_id") or ""),
+                provider_model=str(pending.get("provider_model") or ""),
+                window=current_window(
+                    timezone_name=self.settings.timezone,
+                    reset_time=self.settings.reset_time,
+                ),
+            )
+            if cooldown:
+                logger.warning(
+                    "[ProviderQuotaRouter] quota cooldown active: provider=%s quota_key=%s until=%s",
+                    pending.get("provider_id"),
+                    cooldown.get("quota_key"),
+                    datetime.fromtimestamp(
+                        float(cooldown.get("expires_at") or 0)
+                    ).astimezone().isoformat(timespec="seconds"),
+                )
 
     @filter.command("quota", desc="查看或管理 provider/model token 额度路由。")
     async def quota_command(self, event: AstrMessageEvent, args: GreedyStr = ""):
@@ -475,16 +691,25 @@ class ProviderQuotaRouterPlugin(Star):
         if subcommand == "reload":
             self._reload_runtime_settings()
             self._sync_core_fallback_guard()
+            checked_count, cooldown_count = await self.router.reconcile_cooldowns(
+                window=current_window(
+                    timezone_name=self.settings.timezone,
+                    reset_time=self.settings.reset_time,
+                )
+            )
             yield event.plain_result(
                 "Provider quota router 已重载："
                 f"chains={len(self.settings.chains)}, dry_run={self.settings.dry_run}, "
-                f"fallback_source={self._fallback_chain_source}"
+                f"fallback_source={self._fallback_chain_source}, "
+                f"checked={checked_count}, cooldowns={cooldown_count}"
             )
             return
 
         if subcommand == "reset-cache":
             await self.state.reset_cache()
-            yield event.plain_result("Provider quota router 本地 pending/overlay 缓存已清理。")
+            yield event.plain_result(
+                "Provider quota router 本地 pending/overlay 缓存已清理；费用保护冷却状态已保留。"
+            )
             return
 
         if subcommand == "dry-run" and len(parts) >= 2:
@@ -590,15 +815,26 @@ class ProviderQuotaRouterPlugin(Star):
             f"alerts: {payload['summary']['alert_count']} critical={payload['summary']['critical_alert_count']}",
         ]
         for row in rows:
+            limit_text = (
+                _format_tokens(row["limit"])
+                if row.get("quota_managed", True)
+                else "unlimited"
+            )
+            cooldown_text = ""
+            if row.get("cooldown_until"):
+                cooldown_text = " cooldown_until=" + datetime.fromtimestamp(
+                    float(row["cooldown_until"])
+                ).astimezone().isoformat(timespec="seconds")
             lines.append(
-                "{status} {provider_id} model={model} used={used}/{limit} pending={pending} overlay={overlay}".format(
+                "{status} {provider_id} model={model} used={used}/{limit} pending={pending} overlay={overlay}{cooldown}".format(
                     status=row["status"],
                     provider_id=row["provider_id"],
                     model=row["provider_model"] or "-",
                     used=_format_tokens(row["effective_tokens"]),
-                    limit=_format_tokens(row["limit"]),
+                    limit=limit_text,
                     pending=_format_tokens(row["pending_tokens"]),
                     overlay=_format_tokens(row["overlay_tokens"]),
+                    cooldown=cooldown_text,
                 )
             )
         return "\n".join(lines)
@@ -622,8 +858,16 @@ class ProviderQuotaRouterPlugin(Star):
             "state": {
                 "pending_count": len(state.get("pending", {}) or {}),
                 "overlay_count": len(state.get("overlays", []) or []),
+                "cooldown_count": len(state.get("cooldowns", {}) or {}),
+                "provider_group_circuit_count": len(
+                    state.get("provider_group_circuits", {}) or {}
+                ),
                 "pending": list((state.get("pending", {}) or {}).values()),
                 "overlays": state.get("overlays", []) or [],
+                "cooldowns": list((state.get("cooldowns", {}) or {}).values()),
+                "provider_group_circuits": list(
+                    (state.get("provider_group_circuits", {}) or {}).values()
+                ),
             },
             "decisions": read_recent_decisions(self.state.decisions_path, limit=30),
         }
@@ -646,6 +890,17 @@ class ProviderQuotaRouterPlugin(Star):
             "fallback_watch_interval_seconds": self.settings.fallback_watch_interval_seconds,
             "strict_priority_order": self.settings.strict_priority_order,
             "disable_astrbot_error_fallback": self.settings.disable_astrbot_error_fallback,
+            "quota_cooldown_seconds": self.settings.quota_cooldown_seconds,
+            "unlimited_provider_prefixes": list(
+                self.settings.unlimited_provider_prefixes
+            ),
+            "volcengine_403_circuit_enabled": self.settings.volcengine_403_circuit_enabled,
+            "volcengine_provider_source_ids": list(
+                self.settings.volcengine_provider_source_ids
+            ),
+            "volcengine_403_cooldown_seconds": self.settings.volcengine_403_cooldown_seconds,
+            "volcengine_probe_check_interval_seconds": self.settings.volcengine_probe_check_interval_seconds,
+            "volcengine_probe_timeout_seconds": self.settings.volcengine_probe_timeout_seconds,
             "core_fallback_guard_active": self._core_fallback_guard_active,
             "fallback_watch_active": self._fallback_chain_is_dynamic,
             "fallback_config_path": str(self._cmd_config_path),
