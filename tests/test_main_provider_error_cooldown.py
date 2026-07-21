@@ -26,6 +26,7 @@ class MainProviderErrorCooldownTests(unittest.IsolatedAsyncioTestCase):
             plugin.settings = RouterSettings(
                 provider_error_cooldown_enabled=True,
                 provider_error_cooldown_seconds=1_800,
+                volcengine_403_circuit_enabled=False,
             )
             plugin.state = QuotaStateStore(Path(temp_dir))
             provider = SimpleNamespace(
@@ -54,6 +55,42 @@ class MainProviderErrorCooldownTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 await plugin.opencode_quota_guard_cooldown(provider), circuit
             )
+
+    async def test_guard_error_opens_volcengine_group_before_agent_finishes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plugin = object.__new__(ProviderQuotaRouterPlugin)
+            plugin.settings = RouterSettings(
+                provider_error_cooldown_enabled=True,
+                provider_error_cooldown_seconds=1_800,
+                volcengine_403_circuit_enabled=True,
+                volcengine_403_cooldown_seconds=1_800,
+            )
+            plugin.state = QuotaStateStore(Path(temp_dir))
+            plugin.router = SimpleNamespace(
+                is_volcengine_provider=lambda provider_id: provider_id.startswith(
+                    "openai/"
+                )
+            )
+            provider = SimpleNamespace(
+                provider_config={
+                    "id": "openai/doubao-a",
+                    "model": "doubao-a",
+                },
+                get_model=lambda: "doubao-a",
+            )
+
+            await plugin.opencode_quota_guard_error(
+                provider,
+                RuntimeError("Error code: 403 AccountOverdueError"),
+            )
+
+            group = await plugin.state.get_provider_group_circuit(
+                group_id="volcengine"
+            )
+            self.assertIsNotNone(group)
+            self.assertEqual(group["trigger_provider_id"], "openai/doubao-a")
 
 
 if __name__ == "__main__":

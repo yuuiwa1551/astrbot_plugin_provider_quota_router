@@ -44,7 +44,7 @@ class RouterSettings:
     use_astrbot_fallback_chain: bool = True
     fallback_watch_interval_seconds: int = 300
     strict_priority_order: bool = True
-    disable_astrbot_error_fallback: bool = False
+    disable_astrbot_error_fallback: bool = True
     quota_cooldown_seconds: int = 86_400
     unlimited_provider_prefixes: tuple[str, ...] = ("deepseek/",)
     upstream_quota_provider_prefixes: tuple[str, ...] = ("opencode-zen/",)
@@ -55,6 +55,7 @@ class RouterSettings:
     volcengine_probe_timeout_seconds: int = 30
     provider_error_cooldown_enabled: bool = True
     provider_error_cooldown_seconds: int = 1_800
+    provider_error_request_max_retries: int = 1
     provider_error_admin_notify_enabled: bool = True
     provider_error_admin_notify_interval_seconds: int = 3_600
     provider_error_suppress_current_chat: bool = True
@@ -94,7 +95,7 @@ class RouterSettings:
             ),
             strict_priority_order=bool(raw.get("strict_priority_order", True)),
             disable_astrbot_error_fallback=bool(
-                raw.get("disable_astrbot_error_fallback", False)
+                raw.get("disable_astrbot_error_fallback", True)
             ),
             quota_cooldown_seconds=_positive_int(
                 raw.get("quota_cooldown_seconds"), 86_400
@@ -129,6 +130,12 @@ class RouterSettings:
             ),
             provider_error_cooldown_seconds=_positive_int(
                 raw.get("provider_error_cooldown_seconds"), 1_800
+            ),
+            provider_error_request_max_retries=max(
+                1,
+                _positive_int(
+                    raw.get("provider_error_request_max_retries"), 1
+                ),
             ),
             provider_error_admin_notify_enabled=bool(
                 raw.get("provider_error_admin_notify_enabled", True)

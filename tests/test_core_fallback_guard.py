@@ -4,8 +4,11 @@ import unittest
 from types import SimpleNamespace
 
 from core.core_fallback_guard import (
+    CORE_FALLBACK_APPLIED_EXTRA_KEY,
     CORE_FALLBACK_DROPPED_EXTRA_KEY,
     CORE_FALLBACK_GUARD_EXTRA_KEY,
+    CORE_FALLBACK_SAFE_PROVIDERS_EXTRA_KEY,
+    CORE_REQUEST_MAX_RETRIES_EXTRA_KEY,
     install_core_fallback_guard,
     is_core_fallback_guard_installed,
     uninstall_core_fallback_guard,
@@ -26,6 +29,7 @@ class FakeEvent:
 class FakeRunner:
     async def reset(self, *args, **kwargs) -> None:
         self.received_fallbacks = kwargs.get("fallback_providers")
+        self.request_max_retries = kwargs.get("request_max_retries")
 
 
 def fake_provider(provider_id: str):
@@ -41,8 +45,15 @@ class CoreFallbackGuardTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         uninstall_core_fallback_guard(self.owner, FakeRunner)
 
-    async def test_guard_drops_fallbacks_for_marked_event(self) -> None:
+    async def test_guard_replaces_fallbacks_with_safe_order_and_one_retry(
+        self,
+    ) -> None:
         event = FakeEvent(True)
+        event.set_extra(
+            CORE_FALLBACK_SAFE_PROVIDERS_EXTRA_KEY,
+            [fake_provider("provider-c"), fake_provider("provider-b")],
+        )
+        event.set_extra(CORE_REQUEST_MAX_RETRIES_EXTRA_KEY, 1)
         run_context = SimpleNamespace(context=SimpleNamespace(event=event))
         runner = FakeRunner()
 
@@ -52,12 +63,25 @@ class CoreFallbackGuardTests(unittest.IsolatedAsyncioTestCase):
             run_context,
             None,
             None,
-            fallback_providers=[fake_provider("provider-b")],
+            fallback_providers=[
+                fake_provider("provider-b"),
+                fake_provider("provider-unsafe"),
+            ],
+            request_max_retries=5,
         )
 
-        self.assertEqual(runner.received_fallbacks, [])
         self.assertEqual(
-            event.get_extra(CORE_FALLBACK_DROPPED_EXTRA_KEY), ["provider-b"]
+            [item.provider_config["id"] for item in runner.received_fallbacks],
+            ["provider-c", "provider-b"],
+        )
+        self.assertEqual(runner.request_max_retries, 1)
+        self.assertEqual(
+            event.get_extra(CORE_FALLBACK_APPLIED_EXTRA_KEY),
+            ["provider-c", "provider-b"],
+        )
+        self.assertEqual(
+            event.get_extra(CORE_FALLBACK_DROPPED_EXTRA_KEY),
+            ["provider-unsafe"],
         )
 
     async def test_guard_preserves_fallbacks_for_unmarked_event(self) -> None:

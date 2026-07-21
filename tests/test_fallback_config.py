@@ -132,7 +132,7 @@ class FallbackConfigTests(unittest.TestCase):
         settings = RouterSettings.from_raw({})
         self.assertEqual(settings.fallback_watch_interval_seconds, 300)
         self.assertTrue(settings.strict_priority_order)
-        self.assertFalse(settings.disable_astrbot_error_fallback)
+        self.assertTrue(settings.disable_astrbot_error_fallback)
 
     def test_use_last_is_only_safe_for_quota_exhaustion(self) -> None:
         self.assertTrue(

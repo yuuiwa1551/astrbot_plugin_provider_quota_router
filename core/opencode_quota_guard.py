@@ -37,6 +37,7 @@ def install_opencode_quota_guard(
 
     async def guarded_text_chat(provider: Any, *args: Any, **kwargs: Any) -> Any:
         await _raise_if_cooling(state, provider)
+        kwargs = _with_request_max_retries(state, provider, kwargs)
         try:
             return await state["original_text_chat"](provider, *args, **kwargs)
         except Exception as exc:  # noqa: BLE001
@@ -49,6 +50,7 @@ def install_opencode_quota_guard(
         **kwargs: Any,
     ) -> AsyncGenerator[Any, None]:
         await _raise_if_cooling(state, provider)
+        kwargs = _with_request_max_retries(state, provider, kwargs)
         try:
             async for item in state["original_text_chat_stream"](
                 provider, *args, **kwargs
@@ -98,6 +100,27 @@ def _load_provider_class() -> type:
     from astrbot.core.provider.sources.openai_source import ProviderOpenAIOfficial
 
     return ProviderOpenAIOfficial
+
+
+def _with_request_max_retries(
+    state: dict[str, Any],
+    provider: Any,
+    kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    values: list[int] = []
+    for owner in tuple(state["owners"]):
+        getter = getattr(owner, "opencode_quota_guard_request_max_retries", None)
+        if not callable(getter):
+            continue
+        try:
+            values.append(max(1, int(getter(provider))))
+        except Exception:  # noqa: BLE001
+            continue
+    if not values:
+        return kwargs
+    guarded_kwargs = dict(kwargs)
+    guarded_kwargs["request_max_retries"] = min(values)
+    return guarded_kwargs
 
 
 async def _raise_if_cooling(state: dict[str, Any], provider: Any) -> None:

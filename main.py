@@ -25,8 +25,11 @@ from astrbot.core.star.filter.command import GreedyStr
 from .core.config import ChainConfig, RouterSettings
 from .core.admin_alerts import build_provider_error_alert, resolve_admin_targets
 from .core.core_fallback_guard import (
+    CORE_FALLBACK_APPLIED_EXTRA_KEY,
     CORE_FALLBACK_DROPPED_EXTRA_KEY,
     CORE_FALLBACK_GUARD_EXTRA_KEY,
+    CORE_FALLBACK_SAFE_PROVIDERS_EXTRA_KEY,
+    CORE_REQUEST_MAX_RETRIES_EXTRA_KEY,
     install_core_fallback_guard,
     uninstall_core_fallback_guard,
 )
@@ -62,7 +65,7 @@ from .core.time_window import current_window, window_for_local_date
 
 
 PLUGIN_NAME = "astrbot_plugin_provider_quota_router"
-PLUGIN_VERSION = "0.10.0"
+PLUGIN_VERSION = "0.11.1"
 PLUGIN_REPOSITORY = "https://github.com/yuuiwa1551/astrbot_plugin_provider_quota_router"
 PLUGIN_DESCRIPTION = "按 provider/model 每日 token 额度自动降级路由 AstrBot 聊天模型。"
 HOOK_PRIORITY = 900
@@ -94,6 +97,7 @@ CONFIG_KEYS = {
     "volcengine_probe_timeout_seconds",
     "provider_error_cooldown_enabled",
     "provider_error_cooldown_seconds",
+    "provider_error_request_max_retries",
     "provider_error_admin_notify_enabled",
     "provider_error_admin_notify_interval_seconds",
     "provider_error_suppress_current_chat",
@@ -362,7 +366,9 @@ class ProviderQuotaRouterPlugin(Star):
                 self._core_fallback_guard_active = False
             else:
                 logger.info(
-                    "[ProviderQuotaRouter] AstrBot core error fallback guard enabled"
+                    "[ProviderQuotaRouter] AstrBot safe error fallback guard enabled: "
+                    "request_max_retries=%s",
+                    self.settings.provider_error_request_max_retries,
                 )
         elif not should_enable:
             self._disable_core_fallback_guard()
@@ -443,6 +449,15 @@ class ProviderQuotaRouterPlugin(Star):
             or self.settings.dry_run
         ):
             return None
+        if (
+            self.settings.volcengine_403_circuit_enabled
+            and self.router.is_volcengine_provider(provider_id)
+        ):
+            group_circuit = await self.state.get_provider_group_circuit(
+                group_id=VOLCENGINE_GROUP_ID
+            )
+            if group_circuit:
+                return group_circuit
         if self.settings.provider_error_cooldown_enabled:
             model_circuit = await self.state.get_provider_model_circuit(
                 provider_id=provider_id
@@ -469,6 +484,9 @@ class ProviderQuotaRouterPlugin(Star):
         await self.state.clear_cooldown(quota_key=quota_key)
         return None
 
+    def opencode_quota_guard_request_max_retries(self, provider: Any) -> int:
+        return self.settings.provider_error_request_max_retries
+
     async def opencode_quota_guard_error(
         self, provider: Any, exc: Exception
     ) -> None:
@@ -481,6 +499,10 @@ class ProviderQuotaRouterPlugin(Star):
             provider_model=provider_model,
             error_text=error_text,
         )
+        await self._start_volcengine_403_circuit(
+            provider_id=provider_id,
+            error_text=error_text,
+        )
         if (
             self.settings.is_upstream_quota_provider(provider_id)
             and is_upstream_free_quota_exhausted_text(error_text)
@@ -490,6 +512,35 @@ class ProviderQuotaRouterPlugin(Star):
                 provider_model=provider_model,
                 error_text=error_text,
             )
+
+    async def _start_volcengine_403_circuit(
+        self,
+        *,
+        provider_id: str,
+        error_text: str,
+    ) -> dict[str, Any] | None:
+        if (
+            self.settings.dry_run
+            or not self.settings.volcengine_403_circuit_enabled
+            or not self.router.is_volcengine_provider(provider_id)
+            or not is_http_403_error_text(error_text)
+        ):
+            return None
+        circuit = await self.state.open_provider_group_circuit(
+            group_id=VOLCENGINE_GROUP_ID,
+            trigger_provider_id=provider_id,
+            ttl_seconds=self.settings.volcengine_403_cooldown_seconds,
+            error=error_text,
+        )
+        logger.error(
+            "[ProviderQuotaRouter] Volcengine HTTP 403 circuit opened: "
+            "provider=%s retry_at=%s",
+            provider_id,
+            datetime.fromtimestamp(
+                float(circuit.get("retry_at") or 0)
+            ).astimezone().isoformat(timespec="seconds"),
+        )
+        return circuit
 
     async def _start_provider_error_cooldown(
         self,
@@ -753,24 +804,60 @@ class ProviderQuotaRouterPlugin(Star):
             timezone_name=self.settings.timezone,
             reset_time=self.settings.reset_time,
         )
+        required_modalities = self._required_modalities(event)
         request_id = self._request_id(event)
         decision = await self.router.decide(
             current_provider_id=current_provider_id,
             window=window,
-            required_modalities=self._required_modalities(event),
+            required_modalities=required_modalities,
         )
-        await self.state.record_decision(
-            decision_payload(
-                request_id=request_id,
-                window=window,
-                decision=decision,
-                dry_run=self.settings.dry_run,
+        safe_fallback_ids: list[str] = []
+        safe_fallback_providers: list[Any] = []
+        if self._core_fallback_guard_active and not self.settings.dry_run:
+            selected_provider_id = str(
+                decision.selected_provider_id or current_provider_id
             )
+            if decision.action not in {"skip", "block"}:
+                safe_fallback_ids = (
+                    await self.router.eligible_fallback_provider_ids(
+                        selected_provider_id=selected_provider_id,
+                        window=window,
+                        required_modalities=required_modalities,
+                    )
+                )
+                safe_fallback_providers = [
+                    provider
+                    for provider_id in safe_fallback_ids
+                    if (provider := self.context.get_provider_by_id(provider_id))
+                    is not None
+                ]
+
+        payload = decision_payload(
+            request_id=request_id,
+            window=window,
+            decision=decision,
+            dry_run=self.settings.dry_run,
         )
+        payload["safe_fallback_provider_ids"] = safe_fallback_ids
+        payload["request_max_retries"] = (
+            self.settings.provider_error_request_max_retries
+            if self._core_fallback_guard_active and not self.settings.dry_run
+            else None
+        )
+        await self.state.record_decision(payload)
+
         if decision.action == "skip":
             return
         if self._core_fallback_guard_active and not self.settings.dry_run:
             event.set_extra(CORE_FALLBACK_GUARD_EXTRA_KEY, True)
+            event.set_extra(
+                CORE_FALLBACK_SAFE_PROVIDERS_EXTRA_KEY,
+                safe_fallback_providers,
+            )
+            event.set_extra(
+                CORE_REQUEST_MAX_RETRIES_EXTRA_KEY,
+                self.settings.provider_error_request_max_retries,
+            )
         event.set_extra("provider_quota_router_request_id", request_id)
         event.set_extra("provider_quota_router_decision", decision.action)
         event.set_extra("provider_quota_router_reason", decision.reason)
@@ -829,10 +916,16 @@ class ProviderQuotaRouterPlugin(Star):
         run_context: Any,
         response: LLMResponse,
     ) -> None:
+        applied_fallbacks = event.get_extra(CORE_FALLBACK_APPLIED_EXTRA_KEY)
+        if applied_fallbacks:
+            logger.info(
+                "[ProviderQuotaRouter] safe AstrBot error fallback candidates: %s",
+                applied_fallbacks,
+            )
         dropped_fallbacks = event.get_extra(CORE_FALLBACK_DROPPED_EXTRA_KEY)
         if dropped_fallbacks:
             logger.info(
-                "[ProviderQuotaRouter] blocked AstrBot error fallback candidates: %s",
+                "[ProviderQuotaRouter] excluded unsafe AstrBot error fallback candidates: %s",
                 dropped_fallbacks,
             )
         request_id = str(event.get_extra("provider_quota_router_request_id") or "")
@@ -904,24 +997,10 @@ class ProviderQuotaRouterPlugin(Star):
             error_text=error_text,
         )
         upstream_cooldown: dict[str, Any] | None = None
-        if (
-            self.settings.volcengine_403_circuit_enabled
-            and self.router.is_volcengine_provider(provider_id)
-            and is_http_403_error_text(error_text)
-        ):
-            circuit = await self.state.open_provider_group_circuit(
-                group_id=VOLCENGINE_GROUP_ID,
-                trigger_provider_id=provider_id,
-                ttl_seconds=self.settings.volcengine_403_cooldown_seconds,
-                error=error_text,
-            )
-            logger.error(
-                "[ProviderQuotaRouter] Volcengine HTTP 403 circuit opened: provider=%s retry_at=%s",
-                provider_id,
-                datetime.fromtimestamp(
-                    float(circuit.get("retry_at") or 0)
-                ).astimezone().isoformat(timespec="seconds"),
-            )
+        circuit = await self._start_volcengine_403_circuit(
+            provider_id=provider_id,
+            error_text=error_text,
+        )
         if (
             self.settings.is_upstream_quota_provider(provider_id)
             and is_upstream_free_quota_exhausted_text(error_text)
@@ -1310,6 +1389,7 @@ class ProviderQuotaRouterPlugin(Star):
             "volcengine_probe_timeout_seconds": self.settings.volcengine_probe_timeout_seconds,
             "provider_error_cooldown_enabled": self.settings.provider_error_cooldown_enabled,
             "provider_error_cooldown_seconds": self.settings.provider_error_cooldown_seconds,
+            "provider_error_request_max_retries": self.settings.provider_error_request_max_retries,
             "provider_error_admin_notify_enabled": self.settings.provider_error_admin_notify_enabled,
             "provider_error_admin_notify_interval_seconds": self.settings.provider_error_admin_notify_interval_seconds,
             "provider_error_suppress_current_chat": self.settings.provider_error_suppress_current_chat,

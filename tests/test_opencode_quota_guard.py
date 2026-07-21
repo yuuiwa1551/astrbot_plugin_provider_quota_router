@@ -17,9 +17,11 @@ class FakeProvider:
             "model": "mimo-v2.5-free",
         }
         self.calls = 0
+        self.last_kwargs = None
 
     async def text_chat(self, *args, **kwargs):
         self.calls += 1
+        self.last_kwargs = kwargs
         raise RuntimeError("FreeUsageLimitError: Rate limit exceeded")
 
     async def text_chat_stream(self, *args, **kwargs):
@@ -38,6 +40,9 @@ class FakeOwner:
     async def opencode_quota_guard_error(self, provider, exc):
         self.errors.append((provider, exc))
 
+    def opencode_quota_guard_request_max_retries(self, provider):
+        return 1
+
 
 class OpenCodeQuotaGuardTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
@@ -55,6 +60,7 @@ class OpenCodeQuotaGuardTests(unittest.IsolatedAsyncioTestCase):
             await provider.text_chat(prompt="test")
 
         self.assertEqual(provider.calls, 1)
+        self.assertEqual(provider.last_kwargs["request_max_retries"], 1)
         self.assertEqual(len(self.owner.errors), 1)
 
     async def test_active_cooldown_blocks_before_external_call(self) -> None:

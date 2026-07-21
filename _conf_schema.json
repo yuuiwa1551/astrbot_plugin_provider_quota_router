@@ -3,7 +3,7 @@
     "description": "启用插件",
     "type": "bool",
     "hint": "关闭后不做 provider 路由，也不记录 pending reservation。",
-    "default": false
+    "default": true
   },
   "timezone": {
     "description": "统计时区",
@@ -94,9 +94,9 @@
     "default": true
   },
   "disable_astrbot_error_fallback": {
-    "description": "禁用 AstrBot 错误 fallback",
+    "description": "接管 AstrBot 错误 fallback（兼容键）",
     "type": "bool",
-    "hint": "开启后，本插件接管的请求只会因额度决策换模型；403、超时等 provider 错误不会再绕过额度判断进入后续模型。",
+    "hint": "开启后，AstrBot 当前请求只使用本插件按实时链、额度、冷却、熔断和模态过滤后的安全 fallback；不再清空全部后续模型。",
     "default": false
   },
   "quota_cooldown_seconds": {
@@ -158,6 +158,12 @@
     "type": "int",
     "hint": "普通 Provider 调用失败后的独立冷却时间，默认 1800 秒（30 分钟）。到期后自动允许再次尝试。",
     "default": 1800
+  },
+  "provider_error_request_max_retries": {
+    "description": "单模型请求最大尝试次数",
+    "type": "int",
+    "hint": "本插件接管的 Agent 请求和 OpenAI-compatible 直连调用中，每个模型最多尝试几次。默认 1，失败后立即冷却并切换后续模型。",
+    "default": 1
   },
   "provider_error_admin_notify_enabled": {
     "description": "Provider 错误私聊管理员",

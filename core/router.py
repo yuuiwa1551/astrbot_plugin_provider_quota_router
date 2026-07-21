@@ -424,6 +424,38 @@ class ProviderQuotaRouter:
                 )
         return rows
 
+    async def eligible_fallback_provider_ids(
+        self,
+        *,
+        selected_provider_id: str,
+        window: UsageWindow,
+        required_modalities: set[str] | None = None,
+    ) -> list[str]:
+        """Return quota-safe providers after the selected model in chain order."""
+        chain, selected_index = self._find_chain(selected_provider_id)
+        if chain is None:
+            return []
+
+        status_rows = await self.status(window=window)
+        status_by_provider = {
+            str(row.get("provider_id") or ""): str(row.get("status") or "")
+            for row in status_rows
+            if str(row.get("chain") or "") == chain.name
+        }
+        allowed_statuses = {"available", "unlimited", "upstream_quota"}
+        required_modalities = required_modalities or set()
+        result: list[str] = []
+        for provider_id in chain.providers[selected_index + 1 :]:
+            if status_by_provider.get(provider_id) not in allowed_statuses:
+                continue
+            provider = self.get_provider(provider_id)
+            if not isinstance(provider, Provider):
+                continue
+            if not self._supports_modalities(provider, required_modalities):
+                continue
+            result.append(provider_id)
+        return result
+
     def is_volcengine_provider(self, provider_id: str) -> bool:
         provider = self.get_provider(provider_id)
         if not isinstance(provider, Provider):

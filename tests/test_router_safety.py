@@ -119,6 +119,40 @@ class RouterSafetyTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(state.provider_model_circuits), 1)
 
+    async def test_safe_fallback_ids_skip_cooling_and_wrong_modality(self) -> None:
+        providers = {
+            "relay/model-a": make_provider("relay/model-a", ["text"], "relay"),
+            "relay/model-b": make_provider("relay/model-b", ["text"], "relay"),
+            "relay/model-c": make_provider("relay/model-c", ["text"], "relay"),
+            "relay/model-d": make_provider(
+                "relay/model-d", ["text", "image"], "relay"
+            ),
+        }
+        state = FakeState()
+        state.provider_model_circuits["relay/model-b"] = {
+            "provider_id": "relay/model-b",
+            "provider_model": "model-b",
+            "started_at": time.time(),
+            "retry_at": time.time() + 1_800,
+            "last_error": "HTTP 429",
+        }
+        router = ProviderQuotaRouter(
+            settings=RouterSettings(
+                chains=[ChainConfig(name="test", providers=list(providers))],
+            ),
+            ledger=MapLedger({}),
+            state=state,
+            get_provider=providers.get,
+        )
+
+        fallback_ids = await router.eligible_fallback_provider_ids(
+            selected_provider_id="relay/model-a",
+            window=SimpleNamespace(window_id="window-a"),
+            required_modalities={"image"},
+        )
+
+        self.assertEqual(fallback_ids, ["relay/model-d"])
+
     async def test_volcengine_group_circuit_skips_all_fire_models(self) -> None:
         providers = {
             "openai/doubao-a": make_provider(

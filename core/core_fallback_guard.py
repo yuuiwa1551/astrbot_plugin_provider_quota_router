@@ -5,9 +5,17 @@ from typing import Any
 
 CORE_FALLBACK_GUARD_EXTRA_KEY = "provider_quota_router_disable_core_fallback"
 CORE_FALLBACK_DROPPED_EXTRA_KEY = "provider_quota_router_core_fallback_dropped"
+CORE_FALLBACK_APPLIED_EXTRA_KEY = "provider_quota_router_core_fallback_applied"
+CORE_FALLBACK_SAFE_PROVIDERS_EXTRA_KEY = (
+    "provider_quota_router_safe_fallback_providers"
+)
+CORE_REQUEST_MAX_RETRIES_EXTRA_KEY = (
+    "provider_quota_router_request_max_retries"
+)
 
 _PATCH_STATE_ATTR = "_provider_quota_router_fallback_guard_state"
 _POSITIONAL_FALLBACK_INDEX = 14
+_POSITIONAL_REQUEST_MAX_RETRIES_INDEX = 15
 
 
 def install_core_fallback_guard(owner: object, runner_cls: type | None = None) -> bool:
@@ -22,9 +30,23 @@ def install_core_fallback_guard(owner: object, runner_cls: type | None = None) -
     async def guarded_reset(runner: Any, *args: Any, **kwargs: Any) -> None:
         event = _event_from_reset_call(args, kwargs)
         if _event_requests_guard(event):
-            args, kwargs, dropped = _without_fallback_providers(args, kwargs)
+            safe_providers = _event_safe_fallback_providers(event)
+            args, kwargs, original_ids, applied_ids = _with_safe_fallback_providers(
+                args,
+                kwargs,
+                safe_providers,
+            )
+            args, kwargs = _with_request_max_retries(
+                args,
+                kwargs,
+                _event_request_max_retries(event),
+            )
+            applied_set = set(applied_ids)
+            dropped = [item for item in original_ids if item not in applied_set]
+            setter = getattr(event, "set_extra", None)
+            if callable(setter):
+                setter(CORE_FALLBACK_APPLIED_EXTRA_KEY, applied_ids)
             if dropped:
-                setter = getattr(event, "set_extra", None)
                 if callable(setter):
                     setter(CORE_FALLBACK_DROPPED_EXTRA_KEY, dropped)
         await original_reset(runner, *args, **kwargs)
@@ -78,28 +100,82 @@ def _event_requests_guard(event: Any) -> bool:
     return bool(getter(CORE_FALLBACK_GUARD_EXTRA_KEY))
 
 
-def _without_fallback_providers(
-    args: tuple[Any, ...], kwargs: dict[str, Any]
-) -> tuple[tuple[Any, ...], dict[str, Any], list[str]]:
+def _event_safe_fallback_providers(event: Any) -> list[Any]:
+    getter = getattr(event, "get_extra", None)
+    if not callable(getter):
+        return []
+    value = getter(CORE_FALLBACK_SAFE_PROVIDERS_EXTRA_KEY)
+    if not isinstance(value, list):
+        return []
+    return [provider for provider in value if _provider_id(provider)]
+
+
+def _event_request_max_retries(event: Any) -> int:
+    getter = getattr(event, "get_extra", None)
+    if not callable(getter):
+        return 1
+    try:
+        return max(1, int(getter(CORE_REQUEST_MAX_RETRIES_EXTRA_KEY) or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _with_safe_fallback_providers(
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    safe_providers: list[Any],
+) -> tuple[tuple[Any, ...], dict[str, Any], list[str], list[str]]:
     updated_kwargs = dict(kwargs)
     if "fallback_providers" in updated_kwargs:
         fallback_providers = updated_kwargs.get("fallback_providers") or []
-        updated_kwargs["fallback_providers"] = []
-        return args, updated_kwargs, _provider_ids(fallback_providers)
+        updated_kwargs["fallback_providers"] = list(safe_providers)
+        return (
+            args,
+            updated_kwargs,
+            _provider_ids(fallback_providers),
+            _provider_ids(safe_providers),
+        )
 
     if len(args) > _POSITIONAL_FALLBACK_INDEX:
         updated_args = list(args)
         fallback_providers = updated_args[_POSITIONAL_FALLBACK_INDEX] or []
-        updated_args[_POSITIONAL_FALLBACK_INDEX] = []
-        return tuple(updated_args), updated_kwargs, _provider_ids(fallback_providers)
+        updated_args[_POSITIONAL_FALLBACK_INDEX] = list(safe_providers)
+        return (
+            tuple(updated_args),
+            updated_kwargs,
+            _provider_ids(fallback_providers),
+            _provider_ids(safe_providers),
+        )
 
-    return args, updated_kwargs, []
+    updated_kwargs["fallback_providers"] = list(safe_providers)
+    return args, updated_kwargs, [], _provider_ids(safe_providers)
+
+
+def _with_request_max_retries(
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    max_retries: int,
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    updated_kwargs = dict(kwargs)
+    if "request_max_retries" in updated_kwargs:
+        updated_kwargs["request_max_retries"] = max_retries
+        return args, updated_kwargs
+    if len(args) > _POSITIONAL_REQUEST_MAX_RETRIES_INDEX:
+        updated_args = list(args)
+        updated_args[_POSITIONAL_REQUEST_MAX_RETRIES_INDEX] = max_retries
+        return tuple(updated_args), updated_kwargs
+    updated_kwargs["request_max_retries"] = max_retries
+    return args, updated_kwargs
 
 
 def _provider_ids(providers: Any) -> list[str]:
     result: list[str] = []
     for provider in providers:
-        provider_config = getattr(provider, "provider_config", {}) or {}
-        provider_id = str(provider_config.get("id") or "")
+        provider_id = _provider_id(provider)
         result.append(provider_id or type(provider).__name__)
     return result
+
+
+def _provider_id(provider: Any) -> str:
+    provider_config = getattr(provider, "provider_config", {}) or {}
+    return str(provider_config.get("id") or "")
