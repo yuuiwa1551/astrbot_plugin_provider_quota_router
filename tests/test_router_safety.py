@@ -33,6 +33,7 @@ class MapLedger:
 class FakeState:
     def __init__(self) -> None:
         self.cooldowns: dict[str, dict] = {}
+        self.provider_model_circuits: dict[str, dict] = {}
         self.provider_group_circuits: dict[str, dict] = {}
 
     async def usage_overlay(self, **kwargs) -> tuple[int, int]:
@@ -58,6 +59,13 @@ class FakeState:
     async def clear_cooldown(self, *, quota_key: str) -> None:
         self.cooldowns.pop(quota_key, None)
 
+    async def get_provider_model_circuit(self, *, provider_id: str):
+        item = self.provider_model_circuits.get(provider_id)
+        if item and float(item.get("retry_at") or 0) > time.time():
+            return dict(item)
+        self.provider_model_circuits.pop(provider_id, None)
+        return None
+
     async def get_provider_group_circuit(self, *, group_id: str):
         item = self.provider_group_circuits.get(group_id)
         return dict(item) if item else None
@@ -78,6 +86,39 @@ def make_provider(
 
 
 class RouterSafetyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_provider_error_cooldown_only_skips_the_failed_model(self) -> None:
+        providers = {
+            "relay/model-a": make_provider("relay/model-a", ["text"], "relay"),
+            "relay/model-b": make_provider("relay/model-b", ["text"], "relay"),
+        }
+        state = FakeState()
+        state.provider_model_circuits["relay/model-a"] = {
+            "provider_id": "relay/model-a",
+            "provider_model": "model-a",
+            "started_at": time.time(),
+            "retry_at": time.time() + 1_800,
+            "last_error": "HTTP 429",
+        }
+        router = ProviderQuotaRouter(
+            settings=RouterSettings(
+                chains=[ChainConfig(name="test", providers=list(providers))],
+            ),
+            ledger=MapLedger({}),
+            state=state,
+            get_provider=providers.get,
+        )
+
+        decision = await router.decide(
+            current_provider_id="relay/model-a",
+            window=SimpleNamespace(window_id="window-a"),
+        )
+
+        self.assertEqual(decision.selected_provider_id, "relay/model-b")
+        self.assertEqual(
+            decision.candidates[0].reason, "provider_error_cooldown"
+        )
+        self.assertEqual(len(state.provider_model_circuits), 1)
+
     async def test_volcengine_group_circuit_skips_all_fire_models(self) -> None:
         providers = {
             "openai/doubao-a": make_provider(

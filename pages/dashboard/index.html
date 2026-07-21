@@ -241,6 +241,7 @@
       .badge.exhausted,
       .badge.cooldown,
       .badge.upstream_quota_cooldown,
+      .badge.provider_error_cooldown,
       .badge.provider_group_cooldown,
       .badge.provider_group_probe,
       .badge.critical {
@@ -857,7 +858,7 @@
         els.windowLabel.textContent =
           `${formatDateTime(windowInfo.start_local)} -> ${formatDateTime(windowInfo.end_local)}`;
         els.modeLabel.textContent =
-          `quota_key_mode=${settings.quota_key_mode || "-"} · action=${settings.exhausted_action || "-"} · priority=${settings.strict_priority_order ? "strict" : "session"} · cooldown=${settings.quota_cooldown_seconds || 0}s · core_fallback=${settings.core_fallback_guard_active ? "blocked" : "on"} · opencode_guard=${settings.opencode_quota_guard_active ? "on" : "off"} · reset=${settings.reset_time || "-"} · fallback=${settings.fallback_chain_source || "-"} · watch=${watchState}`;
+          `quota_key_mode=${settings.quota_key_mode || "-"} · action=${settings.exhausted_action || "-"} · priority=${settings.strict_priority_order ? "strict" : "session"} · quota_cooldown=${settings.quota_cooldown_seconds || 0}s · error_cooldown=${settings.provider_error_cooldown_seconds || 0}s · core_fallback=${settings.core_fallback_guard_active ? "blocked" : "on"} · provider_guard=${settings.opencode_quota_guard_active ? "on" : "off"} · reset=${settings.reset_time || "-"} · fallback=${settings.fallback_chain_source || "-"} · watch=${watchState}`;
         els.modeLabel.title = settings.fallback_last_error
           || `config=${settings.fallback_config_path || "-"} · last_reload=${settings.fallback_last_reload_at || "-"}`;
         els.dryRunBadge.textContent = settings.dry_run ? "dry-run" : "active";
@@ -893,7 +894,7 @@
             const percent = managed && limit > 0 ? Math.min(100, (used / limit) * 100) : 0;
             const severity =
               percent >= 100 ? "critical" : percent >= 90 ? "warning" : "";
-            const statusClass = ["exhausted", "cooldown", "upstream_quota_cooldown", "provider_group_cooldown", "provider_group_probe"].includes(row.status)
+            const statusClass = ["exhausted", "cooldown", "upstream_quota_cooldown", "provider_error_cooldown", "provider_group_cooldown", "provider_group_probe"].includes(row.status)
               ? `badge ${row.status}`
               : "badge";
             const limitText = managed
@@ -949,12 +950,14 @@
         const pending = runtime.pending || [];
         const overlays = runtime.overlays || [];
         const cooldowns = runtime.cooldowns || [];
+        const modelCircuits = runtime.provider_model_circuits || [];
         const circuits = runtime.provider_group_circuits || [];
         const notificationThrottles = runtime.notification_throttles || [];
         const details = [
           `pending: ${runtime.pending_count || 0}`,
           `overlay: ${runtime.overlay_count || 0}`,
           `cooldown: ${runtime.cooldown_count || 0}`,
+          `provider model circuit: ${runtime.provider_model_circuit_count || 0}`,
           `provider group circuit: ${runtime.provider_group_circuit_count || 0}`,
           `admin alert throttle: ${runtime.notification_throttle_count || 0}`,
         ];
@@ -966,6 +969,13 @@
         }
         if (cooldowns[0]) {
           details.push(`cooldown: ${cooldowns[0].provider_id || "-"} until ${new Date(Number(cooldowns[0].expires_at) * 1000).toLocaleString()}`);
+        }
+        if (modelCircuits[0]) {
+          const modelCircuit = modelCircuits[0];
+          details.push(`model cooldown: ${modelCircuit.provider_id || "-"} until ${new Date(Number(modelCircuit.retry_at) * 1000).toLocaleString()}`);
+          if (modelCircuit.last_error) {
+            details.push(`model error: ${modelCircuit.last_error}`);
+          }
         }
         if (circuits[0]) {
           const circuit = circuits[0];

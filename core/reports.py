@@ -56,6 +56,7 @@ def build_alerts(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "cooldown",
                 "provider_group_cooldown",
                 "provider_group_probe",
+                "provider_error_cooldown",
             }
             for row in chain_rows
         ):
@@ -94,6 +95,7 @@ def build_summary(rows: list[dict[str, Any]], alerts: list[dict[str, Any]]) -> d
             "cooldown",
             "provider_group_cooldown",
             "provider_group_probe",
+            "provider_error_cooldown",
         }
     )
     return {

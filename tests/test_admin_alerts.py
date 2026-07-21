@@ -52,6 +52,19 @@ class AdminAlertTests(unittest.TestCase):
         self.assertIn("火山模型组已进入 30 分钟冷却", text)
         self.assertIn("60 分钟内不重复发送", text)
 
+    def test_generic_model_cooldown_does_not_claim_group_outage(self) -> None:
+        text = build_provider_error_alert(
+            provider_id="relay/model-a",
+            error_text="HTTP 429",
+            source_origin="aiocqhttp:GroupMessage:123",
+            circuit_retry_at=None,
+            model_cooldown_until=1_800_000_000,
+            interval_seconds=3_600,
+        )
+
+        self.assertIn("仅该 Provider/模型进入错误冷却", text)
+        self.assertNotIn("模型组", text)
+
 
 if __name__ == "__main__":
     unittest.main()

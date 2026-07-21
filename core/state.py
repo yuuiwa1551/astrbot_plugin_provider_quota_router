@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import Any
 
 
+STATE_VERSION = 6
+
+
 class QuotaStateStore:
     def __init__(self, data_dir: Path) -> None:
         self.data_dir = data_dir
@@ -184,6 +187,55 @@ class QuotaStateStore:
             state = self._load_state()
             self._prune_state(state)
             state["cooldowns"].pop(quota_key, None)
+            self._save_state(state)
+
+    async def get_provider_model_circuit(
+        self, *, provider_id: str
+    ) -> dict[str, Any] | None:
+        async with self._lock:
+            state = self._load_state()
+            self._prune_state(state)
+            item = state["provider_model_circuits"].get(provider_id)
+            self._save_state(state)
+            return dict(item) if isinstance(item, dict) else None
+
+    async def open_provider_model_circuit(
+        self,
+        *,
+        provider_id: str,
+        provider_model: str,
+        ttl_seconds: int,
+        error: str,
+    ) -> dict[str, Any]:
+        async with self._lock:
+            state = self._load_state()
+            self._prune_state(state)
+            now = time.time()
+            existing = state["provider_model_circuits"].get(provider_id)
+            if (
+                isinstance(existing, dict)
+                and float(existing.get("retry_at") or 0) > now
+            ):
+                self._save_state(state)
+                return dict(existing)
+            item = {
+                "provider_id": provider_id,
+                "provider_model": provider_model,
+                "status": "open",
+                "reason": "provider_error",
+                "started_at": now,
+                "retry_at": now + max(0, int(ttl_seconds)),
+                "last_error": str(error or "")[:2000],
+            }
+            state["provider_model_circuits"][provider_id] = item
+            self._save_state(state)
+            return dict(item)
+
+    async def clear_provider_model_circuit(self, *, provider_id: str) -> None:
+        async with self._lock:
+            state = self._load_state()
+            self._prune_state(state)
+            state["provider_model_circuits"].pop(provider_id, None)
             self._save_state(state)
 
     async def get_provider_group_circuit(
@@ -367,10 +419,13 @@ class QuotaStateStore:
             self._prune_state(state)
             self._save_state(
                 {
-                    "version": 5,
+                    "version": STATE_VERSION,
                     "pending": {},
                     "overlays": [],
                     "cooldowns": state.get("cooldowns", {}),
+                    "provider_model_circuits": state.get(
+                        "provider_model_circuits", {}
+                    ),
                     "provider_group_circuits": state.get(
                         "provider_group_circuits", {}
                     ),
@@ -395,10 +450,11 @@ class QuotaStateStore:
             return self._empty_state()
         if not isinstance(data, dict):
             return self._empty_state()
-        data["version"] = 5
+        data["version"] = STATE_VERSION
         data.setdefault("pending", {})
         data.setdefault("overlays", [])
         data.setdefault("cooldowns", {})
+        data.setdefault("provider_model_circuits", {})
         data.setdefault("provider_group_circuits", {})
         data.setdefault("notification_throttles", {})
         if not isinstance(data["pending"], dict):
@@ -407,6 +463,8 @@ class QuotaStateStore:
             data["overlays"] = []
         if not isinstance(data["cooldowns"], dict):
             data["cooldowns"] = {}
+        if not isinstance(data["provider_model_circuits"], dict):
+            data["provider_model_circuits"] = {}
         if not isinstance(data["provider_group_circuits"], dict):
             data["provider_group_circuits"] = {}
         if not isinstance(data["notification_throttles"], dict):
@@ -416,10 +474,11 @@ class QuotaStateStore:
     @staticmethod
     def _empty_state() -> dict[str, Any]:
         return {
-            "version": 5,
+            "version": STATE_VERSION,
             "pending": {},
             "overlays": [],
             "cooldowns": {},
+            "provider_model_circuits": {},
             "provider_group_circuits": {},
             "notification_throttles": {},
         }
@@ -456,6 +515,15 @@ class QuotaStateStore:
                 if isinstance(item, dict)
                 and item.get("quota_key")
                 and item.get("window_id")
+            }
+        model_circuits = state.get("provider_model_circuits", {})
+        if isinstance(model_circuits, dict):
+            state["provider_model_circuits"] = {
+                str(key): item
+                for key, item in model_circuits.items()
+                if isinstance(item, dict)
+                and item.get("provider_id")
+                and float(item.get("retry_at") or 0) > now
             }
         circuits = state.get("provider_group_circuits", {})
         if isinstance(circuits, dict):

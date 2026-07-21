@@ -8,8 +8,12 @@ from typing import Any
 _PATCH_STATE_ATTR = "_provider_quota_router_opencode_quota_guard_state"
 
 
-class OpenCodeQuotaCooldownError(RuntimeError):
+class ProviderModelCooldownError(RuntimeError):
     pass
+
+
+# Backward-compatible import name for existing integrations and tests.
+OpenCodeQuotaCooldownError = ProviderModelCooldownError
 
 
 def install_opencode_quota_guard(
@@ -107,7 +111,9 @@ async def _raise_if_cooling(state: dict[str, Any], provider: Any) -> None:
             continue
         if not cooldown:
             continue
-        retry_at = float(cooldown.get("expires_at") or 0)
+        retry_at = float(
+            cooldown.get("expires_at") or cooldown.get("retry_at") or 0
+        )
         retry_text = (
             datetime.fromtimestamp(retry_at).astimezone().isoformat(timespec="seconds")
             if retry_at
@@ -116,8 +122,9 @@ async def _raise_if_cooling(state: dict[str, Any], provider: Any) -> None:
         provider_id = str(
             getattr(provider, "provider_config", {}).get("id") or "opencode"
         )
-        raise OpenCodeQuotaCooldownError(
-            f"{provider_id} free quota is cooling down until {retry_text}"
+        reason = str(cooldown.get("reason") or "provider_error")
+        raise ProviderModelCooldownError(
+            f"{provider_id} is cooling down until {retry_text} ({reason})"
         )
 
 

@@ -92,6 +92,8 @@ CONFIG_KEYS = {
     "volcengine_403_cooldown_seconds",
     "volcengine_probe_check_interval_seconds",
     "volcengine_probe_timeout_seconds",
+    "provider_error_cooldown_enabled",
+    "provider_error_cooldown_seconds",
     "provider_error_admin_notify_enabled",
     "provider_error_admin_notify_interval_seconds",
     "provider_error_suppress_current_chat",
@@ -380,7 +382,10 @@ class ProviderQuotaRouterPlugin(Star):
     def _sync_opencode_quota_guard(self) -> None:
         should_enable = bool(
             self.settings.enabled
-            and self.settings.upstream_quota_provider_prefixes
+            and (
+                self.settings.provider_error_cooldown_enabled
+                or self.settings.upstream_quota_provider_prefixes
+            )
             and not self.settings.dry_run
         )
         if should_enable and not self._opencode_quota_guard_active:
@@ -396,7 +401,9 @@ class ProviderQuotaRouterPlugin(Star):
                 self._opencode_quota_guard_active = False
             else:
                 logger.info(
-                    "[ProviderQuotaRouter] opencode upstream quota guard enabled: prefixes=%s",
+                    "[ProviderQuotaRouter] provider call cooldown guard enabled: "
+                    "error_cooldown=%s prefixes=%s",
+                    self.settings.provider_error_cooldown_enabled,
                     self.settings.upstream_quota_provider_prefixes,
                 )
         elif not should_enable:
@@ -434,8 +441,15 @@ class ProviderQuotaRouterPlugin(Star):
         if (
             not self.settings.enabled
             or self.settings.dry_run
-            or not self.settings.is_upstream_quota_provider(provider_id)
         ):
+            return None
+        if self.settings.provider_error_cooldown_enabled:
+            model_circuit = await self.state.get_provider_model_circuit(
+                provider_id=provider_id
+            )
+            if model_circuit:
+                return model_circuit
+        if not self.settings.is_upstream_quota_provider(provider_id):
             return None
         quota_key = self._quota_key(provider_id, provider_model)
         cooldown = await self.state.get_cooldown(quota_key=quota_key)
@@ -460,16 +474,52 @@ class ProviderQuotaRouterPlugin(Star):
     ) -> None:
         provider_id, provider_model = self._provider_identity(provider)
         error_text = f"{type(exc).__name__}: {exc}"
-        if (
-            not self.settings.is_upstream_quota_provider(provider_id)
-            or not is_upstream_free_quota_exhausted_text(error_text)
-        ):
+        if not self.settings.enabled or self.settings.dry_run:
             return
-        await self._start_upstream_quota_cooldown(
+        await self._start_provider_error_cooldown(
             provider_id=provider_id,
             provider_model=provider_model,
             error_text=error_text,
         )
+        if (
+            self.settings.is_upstream_quota_provider(provider_id)
+            and is_upstream_free_quota_exhausted_text(error_text)
+        ):
+            await self._start_upstream_quota_cooldown(
+                provider_id=provider_id,
+                provider_model=provider_model,
+                error_text=error_text,
+            )
+
+    async def _start_provider_error_cooldown(
+        self,
+        *,
+        provider_id: str,
+        provider_model: str,
+        error_text: str,
+    ) -> dict[str, Any] | None:
+        if (
+            self.settings.dry_run
+            or not self.settings.provider_error_cooldown_enabled
+            or not provider_id
+        ):
+            return None
+        circuit = await self.state.open_provider_model_circuit(
+            provider_id=provider_id,
+            provider_model=provider_model,
+            ttl_seconds=self.settings.provider_error_cooldown_seconds,
+            error=error_text,
+        )
+        logger.warning(
+            "[ProviderQuotaRouter] provider model error cooldown active: "
+            "provider=%s until=%s error=%s",
+            provider_id,
+            datetime.fromtimestamp(
+                float(circuit.get("retry_at") or 0)
+            ).astimezone().isoformat(timespec="seconds"),
+            " ".join(str(error_text or "").split())[:500],
+        )
+        return circuit
 
     async def _start_upstream_quota_cooldown(
         self,
@@ -848,6 +898,11 @@ class ProviderQuotaRouterPlugin(Star):
         event.set_extra("provider_quota_router_provider_error_handled", True)
         event.set_extra("provider_quota_router_suppress_provider_error", True)
         circuit: dict[str, Any] | None = None
+        model_circuit = await self._start_provider_error_cooldown(
+            provider_id=provider_id,
+            provider_model=self._provider_model(provider_id),
+            error_text=error_text,
+        )
         upstream_cooldown: dict[str, Any] | None = None
         if (
             self.settings.volcengine_403_circuit_enabled
@@ -881,7 +936,7 @@ class ProviderQuotaRouterPlugin(Star):
             provider_id=provider_id,
             error_text=error_text,
             circuit=circuit,
-            upstream_cooldown=upstream_cooldown,
+            model_cooldown=upstream_cooldown or model_circuit,
         )
 
     async def _notify_provider_error_admins(
@@ -891,7 +946,7 @@ class ProviderQuotaRouterPlugin(Star):
         provider_id: str,
         error_text: str,
         circuit: dict[str, Any] | None,
-        upstream_cooldown: dict[str, Any] | None,
+        model_cooldown: dict[str, Any] | None,
     ) -> None:
         if not self.settings.provider_error_admin_notify_enabled:
             return
@@ -924,8 +979,12 @@ class ProviderQuotaRouterPlugin(Star):
                 float(circuit.get("retry_at") or 0) if circuit else None
             ),
             model_cooldown_until=(
-                float(upstream_cooldown.get("expires_at") or 0)
-                if upstream_cooldown
+                float(
+                    model_cooldown.get("expires_at")
+                    or model_cooldown.get("retry_at")
+                    or 0
+                )
+                if model_cooldown
                 else None
             ),
             interval_seconds=self.settings.provider_error_admin_notify_interval_seconds,
@@ -1192,12 +1251,18 @@ class ProviderQuotaRouterPlugin(Star):
                 "pending_count": len(state.get("pending", {}) or {}),
                 "overlay_count": len(state.get("overlays", []) or []),
                 "cooldown_count": len(state.get("cooldowns", {}) or {}),
+                "provider_model_circuit_count": len(
+                    state.get("provider_model_circuits", {}) or {}
+                ),
                 "provider_group_circuit_count": len(
                     state.get("provider_group_circuits", {}) or {}
                 ),
                 "pending": list((state.get("pending", {}) or {}).values()),
                 "overlays": state.get("overlays", []) or [],
                 "cooldowns": list((state.get("cooldowns", {}) or {}).values()),
+                "provider_model_circuits": list(
+                    (state.get("provider_model_circuits", {}) or {}).values()
+                ),
                 "provider_group_circuits": list(
                     (state.get("provider_group_circuits", {}) or {}).values()
                 ),
@@ -1243,6 +1308,8 @@ class ProviderQuotaRouterPlugin(Star):
             "volcengine_403_cooldown_seconds": self.settings.volcengine_403_cooldown_seconds,
             "volcengine_probe_check_interval_seconds": self.settings.volcengine_probe_check_interval_seconds,
             "volcengine_probe_timeout_seconds": self.settings.volcengine_probe_timeout_seconds,
+            "provider_error_cooldown_enabled": self.settings.provider_error_cooldown_enabled,
+            "provider_error_cooldown_seconds": self.settings.provider_error_cooldown_seconds,
             "provider_error_admin_notify_enabled": self.settings.provider_error_admin_notify_enabled,
             "provider_error_admin_notify_interval_seconds": self.settings.provider_error_admin_notify_interval_seconds,
             "provider_error_suppress_current_chat": self.settings.provider_error_suppress_current_chat,

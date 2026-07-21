@@ -121,6 +121,30 @@ class ProviderQuotaRouter:
                     )
                 )
                 continue
+            model_circuit = (
+                await self.state.get_provider_model_circuit(provider_id=provider_id)
+                if self.settings.provider_error_cooldown_enabled
+                else None
+            )
+            if model_circuit:
+                usage = await self._usage(quota_key, window)
+                states.append(
+                    self._candidate(
+                        provider_id,
+                        provider_model,
+                        quota_key,
+                        usage,
+                        chain,
+                        quota_managed,
+                        False,
+                        "provider_error_cooldown",
+                        cooldown={
+                            "started_at": model_circuit.get("started_at"),
+                            "expires_at": model_circuit.get("retry_at"),
+                        },
+                    )
+                )
+                continue
             if not self._supports_modalities(provider, required_modalities):
                 usage = await self._usage(quota_key, window)
                 states.append(
@@ -298,6 +322,13 @@ class ProviderQuotaRouter:
                 safety = chain.safety_buffer(self.settings.default_safety_buffer_tokens) if quota_managed else 0
                 reservation = chain.reservation(self.settings.default_request_reservation_tokens) if quota_managed else 0
                 cooldown = await self.state.get_cooldown(quota_key=quota_key)
+                model_circuit = (
+                    await self.state.get_provider_model_circuit(
+                        provider_id=provider_id
+                    )
+                    if self.settings.provider_error_cooldown_enabled
+                    else None
+                )
                 if cooldown and (
                     (
                         not quota_managed
@@ -321,6 +352,8 @@ class ProviderQuotaRouter:
                         if group_circuit.get("status") == "probing"
                         else "provider_group_cooldown"
                     )
+                elif model_circuit:
+                    status = "provider_error_cooldown"
                 elif cooldown and str(cooldown.get("reason") or "").startswith(
                     "upstream_quota"
                 ) and (
@@ -347,6 +380,14 @@ class ProviderQuotaRouter:
                         if usage.effective_tokens + reservation + safety < limit
                         else "exhausted"
                     )
+                display_cooldown = (
+                    {
+                        "started_at": model_circuit.get("started_at"),
+                        "expires_at": model_circuit.get("retry_at"),
+                    }
+                    if model_circuit
+                    else cooldown
+                )
                 rows.append(
                     {
                         "chain": chain.name,
@@ -357,8 +398,13 @@ class ProviderQuotaRouter:
                         "safety_buffer": safety,
                         "reservation_tokens": reservation,
                         "quota_managed": quota_managed,
-                        "cooldown_started_at": cooldown.get("started_at") if cooldown else None,
-                        "cooldown_until": cooldown.get("expires_at") if cooldown else None,
+                        "cooldown_started_at": display_cooldown.get("started_at") if display_cooldown else None,
+                        "cooldown_until": display_cooldown.get("expires_at") if display_cooldown else None,
+                        "provider_error": (
+                            model_circuit.get("last_error")
+                            if model_circuit
+                            else None
+                        ),
                         "db_tokens": usage.db_tokens,
                         "pending_tokens": usage.pending_tokens,
                         "overlay_tokens": usage.overlay_tokens,

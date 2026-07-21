@@ -53,6 +53,8 @@ class RouterSettings:
     volcengine_403_cooldown_seconds: int = 1_800
     volcengine_probe_check_interval_seconds: int = 30
     volcengine_probe_timeout_seconds: int = 30
+    provider_error_cooldown_enabled: bool = True
+    provider_error_cooldown_seconds: int = 1_800
     provider_error_admin_notify_enabled: bool = True
     provider_error_admin_notify_interval_seconds: int = 3_600
     provider_error_suppress_current_chat: bool = True
@@ -121,6 +123,12 @@ class RouterSettings:
             ),
             volcengine_probe_timeout_seconds=max(
                 5, _positive_int(raw.get("volcengine_probe_timeout_seconds"), 30)
+            ),
+            provider_error_cooldown_enabled=bool(
+                raw.get("provider_error_cooldown_enabled", True)
+            ),
+            provider_error_cooldown_seconds=_positive_int(
+                raw.get("provider_error_cooldown_seconds"), 1_800
             ),
             provider_error_admin_notify_enabled=bool(
                 raw.get("provider_error_admin_notify_enabled", True)

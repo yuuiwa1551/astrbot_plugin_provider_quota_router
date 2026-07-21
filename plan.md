@@ -199,3 +199,9 @@ deepseek/deepseek-v4-pro
 目标：本地 token 阈值只约束火山 Provider Source；所有其他 Provider 不受 110 万限制。`cmd_config.json` 的 fallback 变化在下一条 LLM 请求前即时生效，同时保留 300 秒后台兜底。
 
 状态：v0.10.0 已完成并同步实时 Docker 环境，详见 `10期plan.md`。
+
+## 11期 全 Provider 单模型错误冷却
+
+目标：任意模型调用最终失败后，仅将该完整 Provider/模型配置冷却 30 分钟；后续请求跳过它并继续 fallback，不连坐同源的其他模型。火山 403 整组熔断和 opencode 免费额度到次日 11:00 的专用规则保持不变。
+
+状态：v0.11.0 已完成并同步实时 Docker 环境；容器内 49 项测试通过，且已由线上真实 403 验证单模型独立冷却，详见 `11期plan.md`。

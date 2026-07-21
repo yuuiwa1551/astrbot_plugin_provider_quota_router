@@ -84,7 +84,7 @@ def build_provider_error_alert(
         ).astimezone().isoformat(timespec="seconds")
         lines.extend(
             [
-                "处理：该 opencode 免费模型已冷却，其他候选仍可继续使用。",
+                "处理：仅该 Provider/模型进入错误冷却，其他候选仍可继续使用。",
                 f"恢复时间：{retry_text}",
             ]
         )

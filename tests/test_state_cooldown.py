@@ -8,6 +8,62 @@ from core.state import QuotaStateStore
 
 
 class StateCooldownTests(unittest.IsolatedAsyncioTestCase):
+    async def test_provider_model_circuit_is_isolated_persistent_and_expires(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = QuotaStateStore(Path(temp_dir))
+            first = await store.open_provider_model_circuit(
+                provider_id="relay/model-a",
+                provider_model="model-a",
+                ttl_seconds=1_800,
+                error="HTTP 429",
+            )
+            duplicate = await store.open_provider_model_circuit(
+                provider_id="relay/model-a",
+                provider_model="model-a",
+                ttl_seconds=3_600,
+                error="another failure",
+            )
+            await store.open_provider_model_circuit(
+                provider_id="relay/model-b",
+                provider_model="model-b",
+                ttl_seconds=1_800,
+                error="HTTP 500",
+            )
+
+            self.assertEqual(duplicate["retry_at"], first["retry_at"])
+            reloaded = QuotaStateStore(Path(temp_dir))
+            self.assertIsNotNone(
+                await reloaded.get_provider_model_circuit(
+                    provider_id="relay/model-a"
+                )
+            )
+            self.assertIsNotNone(
+                await reloaded.get_provider_model_circuit(
+                    provider_id="relay/model-b"
+                )
+            )
+
+            await reloaded.reset_cache()
+            self.assertIsNotNone(
+                await reloaded.get_provider_model_circuit(
+                    provider_id="relay/model-a"
+                )
+            )
+
+            await reloaded.open_provider_model_circuit(
+                provider_id="relay/expired",
+                provider_model="expired",
+                ttl_seconds=0,
+                error="failure",
+            )
+            self.assertIsNone(
+                await reloaded.get_provider_model_circuit(
+                    provider_id="relay/expired"
+                )
+            )
+
     async def test_notification_claim_is_persistent_and_throttled(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = QuotaStateStore(Path(temp_dir))
