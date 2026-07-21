@@ -98,6 +98,7 @@ CONFIG_KEYS = {
     "provider_error_cooldown_enabled",
     "provider_error_cooldown_seconds",
     "provider_error_request_max_retries",
+    "provider_error_attempt_timeout_seconds",
     "provider_error_admin_notify_enabled",
     "provider_error_admin_notify_interval_seconds",
     "provider_error_suppress_current_chat",
@@ -486,6 +487,9 @@ class ProviderQuotaRouterPlugin(Star):
 
     def opencode_quota_guard_request_max_retries(self, provider: Any) -> int:
         return self.settings.provider_error_request_max_retries
+
+    def opencode_quota_guard_timeout_seconds(self, provider: Any) -> int:
+        return self.settings.provider_error_attempt_timeout_seconds
 
     async def opencode_quota_guard_error(
         self, provider: Any, exc: Exception
@@ -1390,6 +1394,7 @@ class ProviderQuotaRouterPlugin(Star):
             "provider_error_cooldown_enabled": self.settings.provider_error_cooldown_enabled,
             "provider_error_cooldown_seconds": self.settings.provider_error_cooldown_seconds,
             "provider_error_request_max_retries": self.settings.provider_error_request_max_retries,
+            "provider_error_attempt_timeout_seconds": self.settings.provider_error_attempt_timeout_seconds,
             "provider_error_admin_notify_enabled": self.settings.provider_error_admin_notify_enabled,
             "provider_error_admin_notify_interval_seconds": self.settings.provider_error_admin_notify_interval_seconds,
             "provider_error_suppress_current_chat": self.settings.provider_error_suppress_current_chat,
@@ -1490,12 +1495,24 @@ class ProviderQuotaRouterPlugin(Star):
     @staticmethod
     def _required_modalities(event: AstrMessageEvent) -> set[str]:
         required: set[str] = set()
-        for comp in getattr(getattr(event, "message_obj", None), "message", []) or []:
+        pending = list(
+            getattr(getattr(event, "message_obj", None), "message", []) or []
+        )
+        seen: set[int] = set()
+        while pending:
+            comp = pending.pop()
+            marker = id(comp)
+            if marker in seen:
+                continue
+            seen.add(marker)
             name = comp.__class__.__name__.lower()
             if "image" in name:
                 required.add("image")
             elif "record" in name or "audio" in name:
                 required.add("audio")
+            nested = getattr(comp, "chain", None)
+            if isinstance(nested, (list, tuple)):
+                pending.extend(nested)
         return required
 
     def _can_view_status(self, event: AstrMessageEvent) -> bool:

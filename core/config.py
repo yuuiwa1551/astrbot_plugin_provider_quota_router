@@ -56,6 +56,7 @@ class RouterSettings:
     provider_error_cooldown_enabled: bool = True
     provider_error_cooldown_seconds: int = 1_800
     provider_error_request_max_retries: int = 1
+    provider_error_attempt_timeout_seconds: int = 20
     provider_error_admin_notify_enabled: bool = True
     provider_error_admin_notify_interval_seconds: int = 3_600
     provider_error_suppress_current_chat: bool = True
@@ -136,6 +137,9 @@ class RouterSettings:
                 _positive_int(
                     raw.get("provider_error_request_max_retries"), 1
                 ),
+            ),
+            provider_error_attempt_timeout_seconds=_positive_int(
+                raw.get("provider_error_attempt_timeout_seconds"), 20
             ),
             provider_error_admin_notify_enabled=bool(
                 raw.get("provider_error_admin_notify_enabled", True)

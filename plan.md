@@ -211,3 +211,9 @@ deepseek/deepseek-v4-pro
 目标：修复 `disable_astrbot_error_fallback=true` 清空全部后续候选的问题。当前模型最终失败后，立即按实时 fallback 顺序切换到下一个通过额度、冷却、熔断和模态检查的模型；单模型请求重试收紧为 1 次。
 
 状态：v0.11.1 已完成并同步实时 Docker 环境；容器内 51 项测试通过，认证状态 API 已验证安全 fallback guard 与单次模型尝试生效，详见 `12期plan.md`。
+
+## 13期 真实链路回归与首响应止损
+
+目标：避免多个故障 Provider 串行等待造成 Bot 长时间无响应，并修复引用消息内嵌图片未参与模态过滤的问题。
+
+状态：v0.11.2 已完成并同步实时 Docker 环境；容器内 55 项测试通过，全部 7 个实时 Provider 已逐个真实请求，WebChat 端到端链路在 10.25 秒内由 Mimo 返回，详见 `13期plan.md`。

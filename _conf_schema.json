@@ -165,6 +165,12 @@
     "hint": "本插件接管的 Agent 请求和 OpenAI-compatible 直连调用中，每个模型最多尝试几次。默认 1，失败后立即冷却并切换后续模型。",
     "default": 1
   },
+  "provider_error_attempt_timeout_seconds": {
+    "description": "单模型首响应超时秒数",
+    "type": "int",
+    "hint": "OpenAI-compatible 模型在该时间内没有返回首个响应就立即失败、冷却并切换。默认 20 秒；设为 0 关闭插件超时。",
+    "default": 20
+  },
   "provider_error_admin_notify_enabled": {
     "description": "Provider 错误私聊管理员",
     "type": "bool",

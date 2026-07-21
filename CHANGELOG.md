@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.11.2
+
+- 递归识别引用消息 `Reply.chain` 内的图片与语音，在路由和安全 fallback 阶段提前排除不支持请求模态的模型。
+- 新增 `provider_error_attempt_timeout_seconds`，默认将 OpenAI-compatible 模型首响应等待限制为 20 秒；超时后立即冷却当前模型并继续后续 fallback。
+- 发布验证首次包含实时链全部 Provider 的逐个真实请求，以及默认模型失败后由 AstrBot WebChat 进入可用 fallback 的端到端请求。
+
 ## v0.10.0
 
 - 将本地 token 上限严格限定到 `volcengine_provider_source_ids` 对应的火山 Provider Source；中转站、DeepSeek、opencode 及其他非火山模型均不套用 110 万阈值。

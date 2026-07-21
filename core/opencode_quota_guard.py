@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator
 from datetime import datetime
 from typing import Any
@@ -9,6 +10,10 @@ _PATCH_STATE_ATTR = "_provider_quota_router_opencode_quota_guard_state"
 
 
 class ProviderModelCooldownError(RuntimeError):
+    pass
+
+
+class ProviderAttemptTimeoutError(TimeoutError):
     pass
 
 
@@ -39,7 +44,8 @@ def install_opencode_quota_guard(
         await _raise_if_cooling(state, provider)
         kwargs = _with_request_max_retries(state, provider, kwargs)
         try:
-            return await state["original_text_chat"](provider, *args, **kwargs)
+            call = state["original_text_chat"](provider, *args, **kwargs)
+            return await _with_attempt_timeout(state, provider, call)
         except Exception as exc:  # noqa: BLE001
             await _report_error(state, provider, exc)
             raise
@@ -51,10 +57,19 @@ def install_opencode_quota_guard(
     ) -> AsyncGenerator[Any, None]:
         await _raise_if_cooling(state, provider)
         kwargs = _with_request_max_retries(state, provider, kwargs)
+        stream = state["original_text_chat_stream"](provider, *args, **kwargs)
+        iterator = stream.__aiter__()
         try:
-            async for item in state["original_text_chat_stream"](
-                provider, *args, **kwargs
-            ):
+            try:
+                first = await _with_attempt_timeout(
+                    state,
+                    provider,
+                    iterator.__anext__(),
+                )
+            except StopAsyncIteration:
+                return
+            yield first
+            async for item in iterator:
                 yield item
         except Exception as exc:  # noqa: BLE001
             await _report_error(state, provider, exc)
@@ -121,6 +136,41 @@ def _with_request_max_retries(
     guarded_kwargs = dict(kwargs)
     guarded_kwargs["request_max_retries"] = min(values)
     return guarded_kwargs
+
+
+async def _with_attempt_timeout(
+    state: dict[str, Any],
+    provider: Any,
+    awaitable: Any,
+) -> Any:
+    timeout_seconds = _attempt_timeout_seconds(state, provider)
+    if timeout_seconds <= 0:
+        return await awaitable
+    try:
+        return await asyncio.wait_for(awaitable, timeout=timeout_seconds)
+    except TimeoutError as exc:
+        provider_id = str(
+            getattr(provider, "provider_config", {}).get("id") or "provider"
+        )
+        raise ProviderAttemptTimeoutError(
+            f"{provider_id} first response timed out after "
+            f"{timeout_seconds:g} seconds"
+        ) from exc
+
+
+def _attempt_timeout_seconds(state: dict[str, Any], provider: Any) -> float:
+    values: list[float] = []
+    for owner in tuple(state["owners"]):
+        getter = getattr(owner, "opencode_quota_guard_timeout_seconds", None)
+        if not callable(getter):
+            continue
+        try:
+            value = float(getter(provider))
+        except Exception:  # noqa: BLE001
+            continue
+        if value > 0:
+            values.append(value)
+    return min(values) if values else 0.0
 
 
 async def _raise_if_cooling(state: dict[str, Any], provider: Any) -> None:
