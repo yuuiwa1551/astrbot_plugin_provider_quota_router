@@ -2,11 +2,24 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator
+from contextvars import ContextVar, Token
 from datetime import datetime
 from typing import Any
 
 
 _PATCH_STATE_ATTR = "_provider_quota_router_opencode_quota_guard_state"
+_BYPASS_SCOPES: ContextVar[frozenset[str]] = ContextVar(
+    "provider_quota_router_guard_bypass_scopes",
+    default=frozenset(),
+)
+_ROUTE_PLAN: ContextVar[Any | None] = ContextVar(
+    "provider_quota_router_route_plan",
+    default=None,
+)
+_ACTUAL_PROVIDER_ID: ContextVar[str] = ContextVar(
+    "provider_quota_router_actual_provider_id",
+    default="",
+)
 
 
 class ProviderModelCooldownError(RuntimeError):
@@ -19,6 +32,35 @@ class ProviderAttemptTimeoutError(TimeoutError):
 
 # Backward-compatible import name for existing integrations and tests.
 OpenCodeQuotaCooldownError = ProviderModelCooldownError
+
+
+def begin_provider_guard_bypass(*scopes: str) -> Token[frozenset[str]]:
+    """Bypass selected cooldown scopes in only the current async task."""
+    return _BYPASS_SCOPES.set(
+        frozenset(str(scope) for scope in scopes if str(scope))
+    )
+
+
+def end_provider_guard_bypass(token: Token[frozenset[str]]) -> None:
+    _BYPASS_SCOPES.reset(token)
+
+
+def bind_provider_guard_route_plan(
+    plan: Any,
+) -> tuple[Token[Any | None], Token[str]]:
+    return _ROUTE_PLAN.set(plan), _ACTUAL_PROVIDER_ID.set("")
+
+
+def reset_provider_guard_route_plan(
+    token: tuple[Token[Any | None], Token[str]],
+) -> None:
+    route_token, provider_token = token
+    _ROUTE_PLAN.reset(route_token)
+    _ACTUAL_PROVIDER_ID.reset(provider_token)
+
+
+def current_provider_guard_provider_id() -> str:
+    return _ACTUAL_PROVIDER_ID.get()
 
 
 def install_opencode_quota_guard(
@@ -42,10 +84,14 @@ def install_opencode_quota_guard(
 
     async def guarded_text_chat(provider: Any, *args: Any, **kwargs: Any) -> Any:
         await _raise_if_cooling(state, provider)
+        await _report_attempt(state, provider)
         kwargs = _with_request_max_retries(state, provider, kwargs)
         try:
             call = state["original_text_chat"](provider, *args, **kwargs)
-            return await _with_attempt_timeout(state, provider, call)
+            response = await _with_attempt_timeout(state, provider, call)
+            _mark_response_provider(response, provider)
+            await _report_response_error_if_needed(state, provider, response)
+            return response
         except Exception as exc:  # noqa: BLE001
             await _report_error(state, provider, exc)
             raise
@@ -56,6 +102,7 @@ def install_opencode_quota_guard(
         **kwargs: Any,
     ) -> AsyncGenerator[Any, None]:
         await _raise_if_cooling(state, provider)
+        await _report_attempt(state, provider)
         kwargs = _with_request_max_retries(state, provider, kwargs)
         stream = state["original_text_chat_stream"](provider, *args, **kwargs)
         iterator = stream.__aiter__()
@@ -68,8 +115,12 @@ def install_opencode_quota_guard(
                 )
             except StopAsyncIteration:
                 return
+            _mark_response_provider(first, provider)
+            await _report_response_error_if_needed(state, provider, first)
             yield first
             async for item in iterator:
+                _mark_response_provider(item, provider)
+                await _report_response_error_if_needed(state, provider, item)
                 yield item
         except Exception as exc:  # noqa: BLE001
             await _report_error(state, provider, exc)
@@ -174,12 +225,21 @@ def _attempt_timeout_seconds(state: dict[str, Any], provider: Any) -> float:
 
 
 async def _raise_if_cooling(state: dict[str, Any], provider: Any) -> None:
+    bypass_scopes = _BYPASS_SCOPES.get()
     for owner in tuple(state["owners"]):
         checker = getattr(owner, "opencode_quota_guard_cooldown", None)
         if not callable(checker):
             continue
         try:
-            cooldown = await checker(provider)
+            try:
+                cooldown = await checker(
+                    provider,
+                    bypass_scopes=bypass_scopes,
+                )
+            except TypeError as exc:
+                if "bypass_scopes" not in str(exc):
+                    raise
+                cooldown = await checker(provider)
         except Exception:  # noqa: BLE001
             continue
         if not cooldown:
@@ -201,6 +261,31 @@ async def _raise_if_cooling(state: dict[str, Any], provider: Any) -> None:
         )
 
 
+def _mark_response_provider(response: Any, provider: Any) -> None:
+    provider_id = str(
+        getattr(provider, "provider_config", {}).get("id") or ""
+    )
+    if not provider_id or response is None:
+        return
+    try:
+        setattr(response, "_provider_quota_router_provider_id", provider_id)
+    except Exception:  # noqa: BLE001
+        return
+
+
+async def _report_response_error_if_needed(
+    state: dict[str, Any],
+    provider: Any,
+    response: Any,
+) -> None:
+    if str(getattr(response, "role", "") or "").casefold() != "err":
+        return
+    error_text = str(
+        getattr(response, "completion_text", "") or "Provider returned role=err"
+    )
+    await _report_error(state, provider, RuntimeError(error_text))
+
+
 async def _report_error(
     state: dict[str, Any],
     provider: Any,
@@ -212,5 +297,24 @@ async def _report_error(
             continue
         try:
             await handler(provider, exc)
+        except Exception:  # noqa: BLE001
+            continue
+
+
+async def _report_attempt(state: dict[str, Any], provider: Any) -> None:
+    route_plan = _ROUTE_PLAN.get()
+    if route_plan is None:
+        return
+    provider_id = str(
+        getattr(provider, "provider_config", {}).get("id") or ""
+    )
+    if provider_id:
+        _ACTUAL_PROVIDER_ID.set(provider_id)
+    for owner in tuple(state["owners"]):
+        handler = getattr(owner, "opencode_quota_guard_attempt", None)
+        if not callable(handler):
+            continue
+        try:
+            await handler(provider, route_plan)
         except Exception:  # noqa: BLE001
             continue

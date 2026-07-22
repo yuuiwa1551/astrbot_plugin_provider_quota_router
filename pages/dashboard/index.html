@@ -904,6 +904,8 @@
                 : "unlimited";
             const cooldownText = row.cooldown_until
               ? `<div class="muted">cooldown until ${escapeHtml(new Date(Number(row.cooldown_until) * 1000).toLocaleString())}</div>`
+              : row.next_probe_at
+                ? `<div class="muted">next quota probe ${escapeHtml(new Date(Number(row.next_probe_at) * 1000).toLocaleString())}</div>`
               : "";
             const groupText = row.provider_group_retry_at
               ? `<div class="muted">${escapeHtml(row.provider_group || "group")} retry at ${escapeHtml(new Date(Number(row.provider_group_retry_at) * 1000).toLocaleString())}</div>`
@@ -957,6 +959,8 @@
           `pending: ${runtime.pending_count || 0}`,
           `overlay: ${runtime.overlay_count || 0}`,
           `cooldown: ${runtime.cooldown_count || 0}`,
+          `local quota cooldown: ${runtime.local_quota_cooldown_count || 0}`,
+          `upstream quota cooldown: ${runtime.upstream_quota_cooldown_count || 0}`,
           `provider model circuit: ${runtime.provider_model_circuit_count || 0}`,
           `provider group circuit: ${runtime.provider_group_circuit_count || 0}`,
           `admin alert throttle: ${runtime.notification_throttle_count || 0}`,
@@ -968,7 +972,15 @@
           details.push(`last overlay: ${overlays[0].provider_id || "-"} ${formatTokens(overlays[0].tokens)}`);
         }
         if (cooldowns[0]) {
-          details.push(`cooldown: ${cooldowns[0].provider_id || "-"} until ${new Date(Number(cooldowns[0].expires_at) * 1000).toLocaleString()}`);
+          const recoveryAt = cooldowns[0].expires_at || cooldowns[0].next_probe_at;
+          const recoveryLabel = cooldowns[0].expires_at ? "until" : "next probe";
+          details.push(`cooldown: ${cooldowns[0].provider_id || "-"} ${recoveryLabel} ${recoveryAt ? new Date(Number(recoveryAt) * 1000).toLocaleString() : "unknown"}`);
+        }
+        if (runtime.state_load_error) {
+          details.push(`state degraded: ${runtime.state_load_error}`);
+        }
+        if (runtime.state_corrupt_backup) {
+          details.push(`state backup: ${runtime.state_corrupt_backup}`);
         }
         if (modelCircuits[0]) {
           const modelCircuit = modelCircuits[0];

@@ -34,6 +34,7 @@ class QuotaLedger:
         quota_key: str,
         quota_key_mode: str,
         window: UsageWindow,
+        provider_ids: tuple[str, ...] | None = None,
     ) -> int:
         token_expr = ProviderStat.token_input_other + ProviderStat.token_output
         if self.count_cached_input_tokens:
@@ -48,6 +49,8 @@ class QuotaLedger:
             filters.append(ProviderStat.provider_id == quota_key)
         else:
             filters.append(ProviderStat.provider_model == quota_key)
+            if provider_ids is not None:
+                filters.append(ProviderStat.provider_id.in_(provider_ids))
 
         async with self.db_helper.get_db() as session:
             result = await session.execute(

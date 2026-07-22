@@ -5,9 +5,11 @@ import json
 import time
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 
-STATE_VERSION = 6
+STATE_VERSION = 7
+DECISION_LOG_MAX_BYTES = 5 * 1024 * 1024
 
 
 class QuotaStateStore:
@@ -16,6 +18,10 @@ class QuotaStateStore:
         self.state_path = data_dir / "quota_state.json"
         self.decisions_path = data_dir / "route_decisions.jsonl"
         self._lock = asyncio.Lock()
+        self.route_lock = asyncio.Lock()
+        self.last_load_error: str | None = None
+        self.last_corrupt_backup: str | None = None
+        self._last_corrupt_signature: tuple[int, int] | None = None
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
     async def reserve(
@@ -44,12 +50,48 @@ class QuotaStateStore:
             }
             self._save_state(state)
 
+    async def retarget_reservation(
+        self,
+        *,
+        request_id: str,
+        window_id: str,
+        quota_key: str,
+        provider_id: str,
+        provider_model: str,
+        tokens: int,
+        ttl_seconds: int,
+    ) -> None:
+        """Atomically move an in-flight reservation to the actual attempt."""
+        async with self._lock:
+            state = self._load_state()
+            self._prune_state(state)
+            now = time.time()
+            existing = state["pending"].get(request_id)
+            created_at = (
+                float(existing.get("created_at") or now)
+                if isinstance(existing, dict)
+                else now
+            )
+            state["pending"][request_id] = {
+                "window_id": window_id,
+                "quota_key": quota_key,
+                "provider_id": provider_id,
+                "provider_model": provider_model,
+                "tokens": max(0, int(tokens)),
+                "created_at": created_at,
+                "expires_at": now + max(1, int(ttl_seconds)),
+            }
+            self._save_state(state)
+
     async def release(
         self,
         *,
         request_id: str,
         actual_tokens: int | None,
         overlay_ttl_seconds: int,
+        actual_provider_id: str | None = None,
+        actual_provider_model: str | None = None,
+        actual_quota_key: str | None = None,
     ) -> dict[str, Any] | None:
         async with self._lock:
             state = self._load_state()
@@ -61,9 +103,12 @@ class QuotaStateStore:
                     {
                         "request_id": request_id,
                         "window_id": pending["window_id"],
-                        "quota_key": pending["quota_key"],
-                        "provider_id": pending["provider_id"],
-                        "provider_model": pending.get("provider_model", ""),
+                        "quota_key": actual_quota_key or pending["quota_key"],
+                        "provider_id": actual_provider_id
+                        or pending["provider_id"],
+                        "provider_model": actual_provider_model
+                        if actual_provider_model is not None
+                        else pending.get("provider_model", ""),
                         "tokens": int(actual_tokens),
                         "created_at": now,
                         "expires_at": now + max(1, int(overlay_ttl_seconds)),
@@ -75,7 +120,7 @@ class QuotaStateStore:
     async def usage_overlay(self, *, quota_key: str, window_id: str) -> tuple[int, int]:
         async with self._lock:
             state = self._load_state()
-            self._prune_state(state)
+            changed = self._prune_state(state)
             pending_tokens = sum(
                 int(item.get("tokens") or 0)
                 for item in state["pending"].values()
@@ -86,15 +131,19 @@ class QuotaStateStore:
                 for item in state["overlays"]
                 if item.get("quota_key") == quota_key and item.get("window_id") == window_id
             )
-            self._save_state(state)
+            if changed:
+                self._save_state(state)
             return pending_tokens, completed_tokens
 
     async def get_cooldown(self, *, quota_key: str) -> dict[str, Any] | None:
         async with self._lock:
             state = self._load_state()
-            self._prune_state(state)
-            item = state["cooldowns"].get(quota_key)
-            self._save_state(state)
+            changed = self._prune_state(state)
+            item = state["upstream_quota_cooldowns"].get(
+                quota_key
+            ) or state["local_quota_cooldowns"].get(quota_key)
+            if changed:
+                self._save_state(state)
             return dict(item) if isinstance(item, dict) else None
 
     async def start_cooldown(
@@ -109,7 +158,7 @@ class QuotaStateStore:
         async with self._lock:
             state = self._load_state()
             self._prune_state(state)
-            existing = state["cooldowns"].get(quota_key)
+            existing = state["local_quota_cooldowns"].get(quota_key)
             if isinstance(existing, dict) and existing.get("window_id") == window_id:
                 self._save_state(state)
                 return dict(existing)
@@ -122,8 +171,9 @@ class QuotaStateStore:
                 "started_at": now,
                 "expires_at": now + max(0, int(ttl_seconds)),
                 "reason": "token_threshold",
+                "kind": "local_quota",
             }
-            state["cooldowns"][quota_key] = item
+            state["local_quota_cooldowns"][quota_key] = item
             self._save_state(state)
             return dict(item)
 
@@ -150,7 +200,141 @@ class QuotaStateStore:
                 "expires_at": max(now, float(expires_at)),
                 "reason": str(reason or "upstream_quota_exhausted"),
             }
-            state["cooldowns"][quota_key] = item
+            item["kind"] = "upstream_quota"
+            item["next_probe_at"] = max(now, float(expires_at))
+            item["probe_lease_until"] = None
+            state["upstream_quota_cooldowns"][quota_key] = item
+            self._save_state(state)
+            return dict(item)
+
+    async def start_upstream_quota_cooldown(
+        self,
+        *,
+        quota_key: str,
+        window_id: str,
+        provider_id: str,
+        provider_model: str,
+        initial_delay_seconds: int,
+        probe_interval_seconds: int,
+        error: str,
+    ) -> dict[str, Any]:
+        async with self._lock:
+            state = self._load_state()
+            self._prune_state(state)
+            now = time.time()
+            existing = state["upstream_quota_cooldowns"].get(quota_key)
+            if isinstance(existing, dict):
+                item = dict(existing)
+                item.update(
+                    {
+                        "window_id": window_id,
+                        "provider_id": provider_id,
+                        "provider_model": provider_model,
+                        "last_error": str(error or "")[:2000],
+                        "probe_interval_seconds": max(
+                            60, int(probe_interval_seconds)
+                        ),
+                    }
+                )
+                if not float(item.get("next_probe_at") or 0):
+                    item["next_probe_at"] = now + max(
+                        60, int(initial_delay_seconds)
+                    )
+            else:
+                item = {
+                    "window_id": window_id,
+                    "quota_key": quota_key,
+                    "provider_id": provider_id,
+                    "provider_model": provider_model,
+                    "started_at": now,
+                    "expires_at": None,
+                    "reason": "upstream_quota_exhausted_unknown_reset",
+                    "kind": "upstream_quota",
+                    "next_probe_at": now
+                    + max(60, int(initial_delay_seconds)),
+                    "probe_interval_seconds": max(
+                        60, int(probe_interval_seconds)
+                    ),
+                    "probe_started_at": None,
+                    "probe_lease_until": None,
+                    "last_probe_at": None,
+                    "last_error": str(error or "")[:2000],
+                }
+            state["upstream_quota_cooldowns"][quota_key] = item
+            self._save_state(state)
+            return dict(item)
+
+    async def due_upstream_quota_probes(self) -> list[dict[str, Any]]:
+        async with self._lock:
+            state = self._load_state()
+            changed = self._prune_state(state)
+            now = time.time()
+            result = [
+                dict(item)
+                for item in state["upstream_quota_cooldowns"].values()
+                if isinstance(item, dict)
+                and float(item.get("next_probe_at") or 0) <= now
+                and float(item.get("probe_lease_until") or 0) <= now
+            ]
+            if changed:
+                self._save_state(state)
+            return sorted(
+                result,
+                key=lambda item: float(item.get("next_probe_at") or 0),
+            )
+
+    async def acquire_upstream_quota_probe(
+        self, *, quota_key: str, lease_seconds: int
+    ) -> dict[str, Any] | None:
+        async with self._lock:
+            state = self._load_state()
+            self._prune_state(state)
+            item = state["upstream_quota_cooldowns"].get(quota_key)
+            if not isinstance(item, dict):
+                return None
+            now = time.time()
+            if float(item.get("next_probe_at") or 0) > now:
+                return None
+            if float(item.get("probe_lease_until") or 0) > now:
+                return None
+            item.update(
+                {
+                    "probe_started_at": now,
+                    "probe_lease_until": now + max(1, int(lease_seconds)),
+                    "last_probe_at": now,
+                }
+            )
+            self._save_state(state)
+            return dict(item)
+
+    async def finish_upstream_quota_probe(
+        self,
+        *,
+        quota_key: str,
+        success: bool,
+        error: str = "",
+    ) -> dict[str, Any] | None:
+        async with self._lock:
+            state = self._load_state()
+            self._prune_state(state)
+            item = state["upstream_quota_cooldowns"].get(quota_key)
+            if not isinstance(item, dict):
+                return None
+            if success:
+                state["upstream_quota_cooldowns"].pop(quota_key, None)
+                self._save_state(state)
+                return None
+            now = time.time()
+            item.update(
+                {
+                    "next_probe_at": now
+                    + max(60, int(item.get("probe_interval_seconds") or 3600)),
+                    "probe_started_at": None,
+                    "probe_lease_until": None,
+                    "last_probe_at": now,
+                    "last_error": str(error or "")[:2000],
+                }
+            )
             self._save_state(state)
             return dict(item)
 
@@ -169,16 +353,24 @@ class QuotaStateStore:
             state = self._load_state()
             self._prune_state(state)
             changed = 0
-            for quota_key, item in list(state["cooldowns"].items()):
-                if not isinstance(item, dict):
-                    continue
-                provider_id = str(item.get("provider_id") or "")
-                if not provider_id.casefold().startswith(normalized_prefixes):
-                    continue
-                if str(item.get("reason") or "") in preserve_reasons:
-                    continue
-                state["cooldowns"].pop(quota_key, None)
-                changed += 1
+            for bucket_name in (
+                "local_quota_cooldowns",
+                "upstream_quota_cooldowns",
+            ):
+                bucket = state[bucket_name]
+                for quota_key, item in list(bucket.items()):
+                    if not isinstance(item, dict):
+                        continue
+                    provider_id = str(item.get("provider_id") or "")
+                    if not provider_id.casefold().startswith(normalized_prefixes):
+                        continue
+                    reason = str(item.get("reason") or "")
+                    if reason in preserve_reasons or reason.startswith(
+                        "upstream_quota_exhausted"
+                    ):
+                        continue
+                    bucket.pop(quota_key, None)
+                    changed += 1
             self._save_state(state)
             return changed
 
@@ -186,7 +378,8 @@ class QuotaStateStore:
         async with self._lock:
             state = self._load_state()
             self._prune_state(state)
-            state["cooldowns"].pop(quota_key, None)
+            state["local_quota_cooldowns"].pop(quota_key, None)
+            state["upstream_quota_cooldowns"].pop(quota_key, None)
             self._save_state(state)
 
     async def get_provider_model_circuit(
@@ -194,9 +387,10 @@ class QuotaStateStore:
     ) -> dict[str, Any] | None:
         async with self._lock:
             state = self._load_state()
-            self._prune_state(state)
+            changed = self._prune_state(state)
             item = state["provider_model_circuits"].get(provider_id)
-            self._save_state(state)
+            if changed:
+                self._save_state(state)
             return dict(item) if isinstance(item, dict) else None
 
     async def open_provider_model_circuit(
@@ -243,9 +437,10 @@ class QuotaStateStore:
     ) -> dict[str, Any] | None:
         async with self._lock:
             state = self._load_state()
-            self._prune_state(state)
+            changed = self._prune_state(state)
             item = state["provider_group_circuits"].get(group_id)
-            self._save_state(state)
+            if changed:
+                self._save_state(state)
             return dict(item) if isinstance(item, dict) else None
 
     async def open_provider_group_circuit(
@@ -406,12 +601,31 @@ class QuotaStateStore:
             self._save_state(state)
             return dict(item)
 
-    async def snapshot(self) -> dict[str, Any]:
+    async def release_notification_claim(
+        self,
+        *,
+        key: str,
+        claimed_at: float,
+    ) -> bool:
         async with self._lock:
             state = self._load_state()
             self._prune_state(state)
+            current = state["notification_throttles"].get(str(key))
+            if not isinstance(current, dict) or float(
+                current.get("claimed_at") or 0
+            ) != float(claimed_at):
+                return False
+            state["notification_throttles"].pop(str(key), None)
             self._save_state(state)
-            return state
+            return True
+
+    async def snapshot(self) -> dict[str, Any]:
+        async with self._lock:
+            state = self._load_state()
+            changed = self._prune_state(state)
+            if changed:
+                self._save_state(state)
+            return self._snapshot_view(state)
 
     async def reset_cache(self) -> None:
         async with self._lock:
@@ -422,7 +636,12 @@ class QuotaStateStore:
                     "version": STATE_VERSION,
                     "pending": {},
                     "overlays": [],
-                    "cooldowns": state.get("cooldowns", {}),
+                    "local_quota_cooldowns": state.get(
+                        "local_quota_cooldowns", {}
+                    ),
+                    "upstream_quota_cooldowns": state.get(
+                        "upstream_quota_cooldowns", {}
+                    ),
                     "provider_model_circuits": state.get(
                         "provider_model_circuits", {}
                     ),
@@ -438,6 +657,14 @@ class QuotaStateStore:
     async def record_decision(self, payload: dict[str, Any]) -> None:
         async with self._lock:
             self.data_dir.mkdir(parents=True, exist_ok=True)
+            if (
+                self.decisions_path.exists()
+                and self.decisions_path.stat().st_size >= DECISION_LOG_MAX_BYTES
+            ):
+                rotated = self.decisions_path.with_suffix(".jsonl.1")
+                if rotated.exists():
+                    rotated.unlink()
+                self.decisions_path.replace(rotated)
             with self.decisions_path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
 
@@ -446,14 +673,21 @@ class QuotaStateStore:
             return self._empty_state()
         try:
             data = json.loads(self.state_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as exc:
+            self.last_load_error = f"{type(exc).__name__}: {exc}"
+            self._backup_corrupt_state()
             return self._empty_state()
         if not isinstance(data, dict):
+            self.last_load_error = "ValueError: quota state root must be an object"
+            self._backup_corrupt_state()
             return self._empty_state()
+        self.last_load_error = None
         data["version"] = STATE_VERSION
+        legacy_cooldowns = data.pop("cooldowns", {})
         data.setdefault("pending", {})
         data.setdefault("overlays", [])
-        data.setdefault("cooldowns", {})
+        data.setdefault("local_quota_cooldowns", {})
+        data.setdefault("upstream_quota_cooldowns", {})
         data.setdefault("provider_model_circuits", {})
         data.setdefault("provider_group_circuits", {})
         data.setdefault("notification_throttles", {})
@@ -461,8 +695,51 @@ class QuotaStateStore:
             data["pending"] = {}
         if not isinstance(data["overlays"], list):
             data["overlays"] = []
-        if not isinstance(data["cooldowns"], dict):
-            data["cooldowns"] = {}
+        if not isinstance(data["local_quota_cooldowns"], dict):
+            data["local_quota_cooldowns"] = {}
+        if not isinstance(data["upstream_quota_cooldowns"], dict):
+            data["upstream_quota_cooldowns"] = {}
+        if isinstance(legacy_cooldowns, dict):
+            for quota_key, item in legacy_cooldowns.items():
+                if not isinstance(item, dict):
+                    continue
+                reason = str(item.get("reason") or "")
+                bucket = (
+                    data["upstream_quota_cooldowns"]
+                    if reason.startswith("upstream_quota")
+                    else data["local_quota_cooldowns"]
+                )
+                bucket.setdefault(quota_key, item)
+        now = time.time()
+        for quota_key, item in list(
+            data["upstream_quota_cooldowns"].items()
+        ):
+            if not isinstance(item, dict):
+                continue
+            normalized = dict(item)
+            normalized.update(
+                {
+                    "quota_key": str(
+                        normalized.get("quota_key") or quota_key
+                    ),
+                    "kind": "upstream_quota",
+                    "reason": "upstream_quota_exhausted_unknown_reset",
+                    "expires_at": None,
+                    "next_probe_at": float(
+                        normalized.get("next_probe_at") or now + 3600
+                    ),
+                    "probe_interval_seconds": max(
+                        60,
+                        int(
+                            normalized.get("probe_interval_seconds") or 3600
+                        ),
+                    ),
+                    "probe_lease_until": normalized.get(
+                        "probe_lease_until"
+                    ),
+                }
+            )
+            data["upstream_quota_cooldowns"][quota_key] = normalized
         if not isinstance(data["provider_model_circuits"], dict):
             data["provider_model_circuits"] = {}
         if not isinstance(data["provider_group_circuits"], dict):
@@ -477,7 +754,8 @@ class QuotaStateStore:
             "version": STATE_VERSION,
             "pending": {},
             "overlays": [],
-            "cooldowns": {},
+            "local_quota_cooldowns": {},
+            "upstream_quota_cooldowns": {},
             "provider_model_circuits": {},
             "provider_group_circuits": {},
             "notification_throttles": {},
@@ -485,46 +763,68 @@ class QuotaStateStore:
 
     def _save_state(self, state: dict[str, Any]) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.state_path.with_suffix(".json.tmp")
+        payload = dict(state)
+        payload.pop("cooldowns", None)
+        tmp_path = self.state_path.with_name(
+            f"{self.state_path.name}.{uuid4().hex}.tmp"
+        )
         tmp_path.write_text(
-            json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True),
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
             encoding="utf-8",
         )
         tmp_path.replace(self.state_path)
+        self.last_load_error = None
 
     @staticmethod
-    def _prune_state(state: dict[str, Any]) -> None:
+    def _prune_state(state: dict[str, Any]) -> bool:
+        changed = False
         now = time.time()
         pending = state.get("pending", {})
         if isinstance(pending, dict):
-            state["pending"] = {
+            cleaned_pending = {
                 key: item
                 for key, item in pending.items()
-                if float(item.get("expires_at") or 0) > now
+                if isinstance(item, dict)
+                and float(item.get("expires_at") or 0) > now
             }
+            changed = changed or len(cleaned_pending) != len(pending)
+            state["pending"] = cleaned_pending
         overlays = state.get("overlays", [])
         if isinstance(overlays, list):
-            state["overlays"] = [
-                item for item in overlays if float(item.get("expires_at") or 0) > now
-            ]
-        cooldowns = state.get("cooldowns", {})
-        if isinstance(cooldowns, dict):
-            state["cooldowns"] = {
-                key: item
-                for key, item in cooldowns.items()
+            cleaned_overlays = [
+                item
+                for item in overlays
                 if isinstance(item, dict)
-                and item.get("quota_key")
-                and item.get("window_id")
-            }
+                and float(item.get("expires_at") or 0) > now
+            ]
+            changed = changed or len(cleaned_overlays) != len(overlays)
+            state["overlays"] = cleaned_overlays
+        for bucket_name in (
+            "local_quota_cooldowns",
+            "upstream_quota_cooldowns",
+        ):
+            cooldowns = state.get(bucket_name, {})
+            if isinstance(cooldowns, dict):
+                cleaned_cooldowns = {
+                    key: item
+                    for key, item in cooldowns.items()
+                    if isinstance(item, dict)
+                    and item.get("quota_key")
+                    and item.get("window_id")
+                }
+                changed = changed or len(cleaned_cooldowns) != len(cooldowns)
+                state[bucket_name] = cleaned_cooldowns
         model_circuits = state.get("provider_model_circuits", {})
         if isinstance(model_circuits, dict):
-            state["provider_model_circuits"] = {
+            cleaned_model_circuits = {
                 str(key): item
                 for key, item in model_circuits.items()
                 if isinstance(item, dict)
                 and item.get("provider_id")
                 and float(item.get("retry_at") or 0) > now
             }
+            changed = changed or len(cleaned_model_circuits) != len(model_circuits)
+            state["provider_model_circuits"] = cleaned_model_circuits
         circuits = state.get("provider_group_circuits", {})
         if isinstance(circuits, dict):
             cleaned: dict[str, dict[str, Any]] = {}
@@ -545,12 +845,45 @@ class QuotaStateStore:
                         }
                     )
                 cleaned[str(key)] = item
+            changed = changed or cleaned != circuits
             state["provider_group_circuits"] = cleaned
         throttles = state.get("notification_throttles", {})
         if isinstance(throttles, dict):
-            state["notification_throttles"] = {
+            cleaned_throttles = {
                 str(key): item
                 for key, item in throttles.items()
                 if isinstance(item, dict)
                 and now - float(item.get("claimed_at") or 0) < 7 * 86_400
             }
+            changed = changed or len(cleaned_throttles) != len(throttles)
+            state["notification_throttles"] = cleaned_throttles
+        return changed
+
+    def _backup_corrupt_state(self) -> None:
+        if not self.state_path.exists():
+            return
+        try:
+            stat = self.state_path.stat()
+            signature = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            return
+        if signature == self._last_corrupt_signature:
+            return
+        backup = self.state_path.with_name(
+            f"quota_state.corrupt.{int(time.time())}.{uuid4().hex[:8]}.json"
+        )
+        try:
+            backup.write_bytes(self.state_path.read_bytes())
+        except OSError:
+            return
+        self.last_corrupt_backup = str(backup)
+        self._last_corrupt_signature = signature
+
+    @staticmethod
+    def _snapshot_view(state: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(state)
+        payload["cooldowns"] = {
+            **(state.get("local_quota_cooldowns", {}) or {}),
+            **(state.get("upstream_quota_cooldowns", {}) or {}),
+        }
+        return payload

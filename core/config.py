@@ -18,7 +18,12 @@ class ChainConfig:
     request_reservation_tokens: int | None = None
 
     def limit(self, default_value: int) -> int:
-        return max(0, int(self.daily_limit_tokens or default_value))
+        value = (
+            self.daily_limit_tokens
+            if self.daily_limit_tokens is not None
+            else default_value
+        )
+        return max(0, int(value))
 
     def safety_buffer(self, default_value: int) -> int:
         return max(0, int(self.safety_buffer_tokens if self.safety_buffer_tokens is not None else default_value))
@@ -55,8 +60,12 @@ class RouterSettings:
     volcengine_probe_timeout_seconds: int = 30
     provider_error_cooldown_enabled: bool = True
     provider_error_cooldown_seconds: int = 1_800
+    unknown_provider_error_cooldown_seconds: int = 300
     provider_error_request_max_retries: int = 1
     provider_error_attempt_timeout_seconds: int = 20
+    upstream_quota_probe_initial_delay_seconds: int = 3_600
+    upstream_quota_probe_interval_seconds: int = 3_600
+    upstream_quota_probe_timeout_seconds: int = 20
     provider_error_admin_notify_enabled: bool = True
     provider_error_admin_notify_interval_seconds: int = 3_600
     provider_error_suppress_current_chat: bool = True
@@ -132,6 +141,9 @@ class RouterSettings:
             provider_error_cooldown_seconds=_positive_int(
                 raw.get("provider_error_cooldown_seconds"), 1_800
             ),
+            unknown_provider_error_cooldown_seconds=_positive_int(
+                raw.get("unknown_provider_error_cooldown_seconds"), 300
+            ),
             provider_error_request_max_retries=max(
                 1,
                 _positive_int(
@@ -140,6 +152,26 @@ class RouterSettings:
             ),
             provider_error_attempt_timeout_seconds=_positive_int(
                 raw.get("provider_error_attempt_timeout_seconds"), 20
+            ),
+            upstream_quota_probe_initial_delay_seconds=max(
+                60,
+                _positive_int(
+                    raw.get("upstream_quota_probe_initial_delay_seconds"),
+                    3_600,
+                ),
+            ),
+            upstream_quota_probe_interval_seconds=max(
+                60,
+                _positive_int(
+                    raw.get("upstream_quota_probe_interval_seconds"),
+                    3_600,
+                ),
+            ),
+            upstream_quota_probe_timeout_seconds=max(
+                5,
+                _positive_int(
+                    raw.get("upstream_quota_probe_timeout_seconds"), 20
+                ),
             ),
             provider_error_admin_notify_enabled=bool(
                 raw.get("provider_error_admin_notify_enabled", True)
@@ -187,6 +219,11 @@ class RouterSettings:
             for source_id in self.volcengine_provider_source_ids
             if source_id
         )
+
+    @property
+    def daily_quota_provider_source_ids(self) -> tuple[str, ...]:
+        """Business name for the legacy volcengine source-id setting."""
+        return self.volcengine_provider_source_ids
 
 
 def _positive_int(value: Any, default: int) -> int:
@@ -257,9 +294,6 @@ def is_quota_only_exhaustion(reasons: list[str]) -> bool:
         in {
             "quota_exceeded",
             "cooldown_active",
-            "upstream_quota_cooldown",
-            "provider_group_cooldown",
-            "provider_group_probe",
         }
         for reason in reasons
     )

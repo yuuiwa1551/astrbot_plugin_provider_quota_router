@@ -57,6 +57,7 @@ def build_alerts(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "provider_group_cooldown",
                 "provider_group_probe",
                 "provider_error_cooldown",
+                "upstream_quota_cooldown",
             }
             for row in chain_rows
         ):
@@ -96,6 +97,7 @@ def build_summary(rows: list[dict[str, Any]], alerts: list[dict[str, Any]]) -> d
             "provider_group_cooldown",
             "provider_group_probe",
             "provider_error_cooldown",
+            "upstream_quota_cooldown",
         }
     )
     return {
@@ -114,7 +116,7 @@ def read_recent_decisions(path: Path, *, limit: int = 50) -> list[dict[str, Any]
     if not path.exists():
         return []
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = _read_tail_lines(path, limit)
     except OSError:
         return []
     items: list[dict[str, Any]] = []
@@ -126,6 +128,25 @@ def read_recent_decisions(path: Path, *, limit: int = 50) -> list[dict[str, Any]
         if isinstance(payload, dict):
             items.append(payload)
     return list(reversed(items))
+
+
+def _read_tail_lines(path: Path, limit: int) -> list[str]:
+    """Read only enough bytes from the end of a JSONL file for the UI."""
+    chunk_size = 64 * 1024
+    with path.open("rb") as fh:
+        fh.seek(0, 2)
+        position = fh.tell()
+        chunks: list[bytes] = []
+        line_count = 0
+        while position > 0 and line_count <= limit:
+            size = min(chunk_size, position)
+            position -= size
+            fh.seek(position)
+            chunk = fh.read(size)
+            chunks.append(chunk)
+            line_count += chunk.count(b"\n")
+    data = b"".join(reversed(chunks))
+    return data.decode("utf-8", errors="replace").splitlines()[-limit:]
 
 
 def write_snapshot(data_dir: Path, window: UsageWindow, payload: dict[str, Any]) -> Path:
@@ -167,6 +188,7 @@ def export_usage_csv(rows: list[dict[str, Any]], window: UsageWindow) -> str:
             "quota_managed",
             "cooldown_started_at",
             "cooldown_until",
+            "next_probe_at",
         ],
         lineterminator="\n",
     )
@@ -190,6 +212,7 @@ def export_usage_csv(rows: list[dict[str, Any]], window: UsageWindow) -> str:
                 "quota_managed": row.get("quota_managed", True),
                 "cooldown_started_at": row.get("cooldown_started_at", ""),
                 "cooldown_until": row.get("cooldown_until", ""),
+                "next_probe_at": row.get("next_probe_at", ""),
             }
         )
     return output.getvalue()

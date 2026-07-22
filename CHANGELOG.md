@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.12.0
+
+- 新增不可变 `ProviderPolicy`、`ErrorDisposition` 和请求级 `RoutePlan`，将火山本地日额度、opencode 未知刷新额度、单模型健康与 Source 账号故障解耦。
+- opencode `FreeUsageLimitError` 不再按北京时间 11:00 到期；用户请求直接跳过，后台使用持久 probe lease 每小时探测，成功后恢复。
+- 只有超时、连接、408/429/5xx 等 Provider 瞬态故障进入 30 分钟健康冷却；未知边界异常短冷却 5 分钟；400/422、上下文、模态、工具、附件和内容审核错误不污染模型。
+- 火山 Source 熔断收紧为明确账号级错误，半开探测使用 task-local bypass，并从同 Source 的已启用安全文本模型中选择候选。
+- 修复 `allow_paid/use_last` 绕过非额度故障、`allow_paid` 借用链首 quota key、fallback 热重载混用 router、最终 overlay 归错 Provider、空管理员列表放行所有用户等问题。
+- 修复 `provider_model` 账本查询跨计费体系串账：本地日额度 SQL 只汇总命中火山开发者计划策略的 Provider ID，付费 Token Plan 的同名模型不再占用免费计划额度。
+- 将路由判断与 reservation 合并为 StateStore 共享原子操作，修复并发请求以及热重载新旧 router 间的双放行窗口。
+- 状态升级为 v7；损坏 JSON 自动备份，读操作只在清理发生时落盘；决策日志按 5 MiB 轮转并使用尾读。
+- 版本统一为 0.12.0。
+
 ## v0.11.2
 
 - 递归识别引用消息 `Reply.chain` 内的图片与语音，在路由和安全 fallback 阶段提前排除不支持请求模态的模型。

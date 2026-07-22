@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 import time
 from typing import Any
@@ -9,6 +9,7 @@ from astrbot.core.provider.provider import Provider
 
 from .config import ChainConfig, RouterSettings, is_quota_only_exhaustion
 from .ledger import QuotaLedger, UsageRecord
+from .policies import ProviderPolicy, build_provider_policy
 from .state import QuotaStateStore
 from .time_window import UsageWindow
 
@@ -41,13 +42,26 @@ class RouteDecision:
     selected_provider_id: str | None = None
     selected_quota_key: str | None = None
     reservation_tokens: int = 0
-    candidates: list[CandidateState] = field(default_factory=list)
+    candidates: tuple[CandidateState, ...] = ()
 
     @property
     def should_reserve(self) -> bool:
         return self.action in {"allow", "switch", "paid_risk", "use_last"} and bool(
             self.selected_quota_key
         )
+
+
+@dataclass(frozen=True)
+class RoutePlan:
+    """Immutable request-level snapshot used across AstrBot hook phases."""
+
+    request_id: str
+    router: "ProviderQuotaRouter"
+    settings: RouterSettings
+    window: UsageWindow
+    required_modalities: frozenset[str]
+    decision: RouteDecision
+    safe_fallback_provider_ids: tuple[str, ...] = ()
 
 
 class ProviderQuotaRouter:
@@ -58,11 +72,56 @@ class ProviderQuotaRouter:
         ledger: QuotaLedger,
         state: QuotaStateStore,
         get_provider,
+        get_all_providers=None,
     ) -> None:
         self.settings = settings
         self.ledger = ledger
         self.state = state
         self.get_provider = get_provider
+        self.get_all_providers = get_all_providers
+
+    async def decide_and_reserve(
+        self,
+        *,
+        request_id: str,
+        current_provider_id: str,
+        window: UsageWindow,
+        required_modalities: set[str] | None = None,
+    ) -> RouteDecision:
+        """Atomically decide and reserve across every hot-reloaded router."""
+        async with self.state.route_lock:
+            decision = await self.decide(
+                current_provider_id=current_provider_id,
+                window=window,
+                required_modalities=required_modalities,
+            )
+            if not decision.should_reserve or self.settings.dry_run:
+                return decision
+            selected_provider_id = str(
+                decision.selected_provider_id or current_provider_id
+            )
+            selected_state = next(
+                (
+                    candidate
+                    for candidate in decision.candidates
+                    if candidate.provider_id == selected_provider_id
+                ),
+                None,
+            )
+            await self.state.reserve(
+                request_id=request_id,
+                window_id=window.window_id,
+                quota_key=str(decision.selected_quota_key),
+                provider_id=selected_provider_id,
+                provider_model=(
+                    selected_state.provider_model
+                    if selected_state
+                    else ""
+                ),
+                tokens=decision.reservation_tokens,
+                ttl_seconds=self.settings.reservation_ttl_seconds,
+            )
+            return decision
 
     async def decide(
         self,
@@ -98,7 +157,7 @@ class ProviderQuotaRouter:
             quota_key = self._quota_key(provider_id, provider_model)
             quota_managed = self.is_token_quota_managed(provider_id)
             if group_circuit and self.is_volcengine_provider(provider_id):
-                usage = await self._usage(quota_key, window)
+                usage = await self._usage(quota_key, window, provider_id)
                 group_status = str(group_circuit.get("status") or "open")
                 states.append(
                     self._candidate(
@@ -127,7 +186,7 @@ class ProviderQuotaRouter:
                 else None
             )
             if model_circuit:
-                usage = await self._usage(quota_key, window)
+                usage = await self._usage(quota_key, window, provider_id)
                 states.append(
                     self._candidate(
                         provider_id,
@@ -146,7 +205,7 @@ class ProviderQuotaRouter:
                 )
                 continue
             if not self._supports_modalities(provider, required_modalities):
-                usage = await self._usage(quota_key, window)
+                usage = await self._usage(quota_key, window, provider_id)
                 states.append(
                     self._candidate(
                         provider_id,
@@ -161,7 +220,7 @@ class ProviderQuotaRouter:
                 )
                 continue
 
-            usage = await self._usage(quota_key, window)
+            usage = await self._usage(quota_key, window, provider_id)
             cooldown = await self.state.get_cooldown(quota_key=quota_key)
             if cooldown:
                 same_window = cooldown.get("window_id") == window.window_id
@@ -169,7 +228,7 @@ class ProviderQuotaRouter:
                 cooldown_reason = str(cooldown.get("reason") or "")
                 is_upstream_cooldown = cooldown_reason.startswith("upstream_quota")
                 if (quota_managed or is_upstream_cooldown) and (
-                    same_window or cooldown_active
+                    is_upstream_cooldown or same_window or cooldown_active
                 ):
                     reason = (
                         "upstream_quota_cooldown"
@@ -215,7 +274,7 @@ class ProviderQuotaRouter:
                     selected_provider_id=provider_id,
                     selected_quota_key=None,
                     reservation_tokens=0,
-                    candidates=states,
+                    candidates=tuple(states),
                 )
 
             limit = chain.limit(self.settings.default_daily_limit_tokens)
@@ -260,24 +319,36 @@ class ProviderQuotaRouter:
                     selected_provider_id=provider_id,
                     selected_quota_key=quota_key,
                     reservation_tokens=reservation,
-                    candidates=states,
+                    candidates=tuple(states),
                 )
 
-        if self.settings.exhausted_action == "allow_paid":
-            original_state = states[0] if states else None
+        quota_only_exhaustion = is_quota_only_exhaustion(
+            [state.reason for state in states]
+        )
+        original_state = next(
+            (
+                state
+                for state in states
+                if state.provider_id == current_provider_id
+            ),
+            None,
+        )
+        if (
+            self.settings.exhausted_action == "allow_paid"
+            and quota_only_exhaustion
+            and original_state is not None
+            and original_state.quota_managed
+        ):
             return RouteDecision(
                 action="paid_risk",
                 reason="chain_exhausted_allow_paid",
                 chain_name=chain.name,
                 original_provider_id=current_provider_id,
                 selected_provider_id=current_provider_id,
-                selected_quota_key=original_state.quota_key if original_state else current_provider_id,
-                reservation_tokens=chain.reservation(self.settings.default_request_reservation_tokens),
-                candidates=states,
+                selected_quota_key=original_state.quota_key,
+                reservation_tokens=original_state.reservation_tokens,
+                candidates=tuple(states),
             )
-        quota_only_exhaustion = is_quota_only_exhaustion(
-            [state.reason for state in states]
-        )
         if (
             self.settings.exhausted_action == "use_last"
             and states
@@ -292,14 +363,14 @@ class ProviderQuotaRouter:
                 selected_provider_id=last.provider_id,
                 selected_quota_key=last.quota_key,
                 reservation_tokens=last.reservation_tokens,
-                candidates=states,
+                candidates=tuple(states),
             )
         return RouteDecision(
             action="block",
             reason="chain_exhausted" if quota_only_exhaustion else "chain_unavailable",
             chain_name=chain.name,
             original_provider_id=current_provider_id,
-            candidates=states,
+            candidates=tuple(states),
         )
 
     async def status(self, *, window: UsageWindow) -> list[dict[str, Any]]:
@@ -316,7 +387,7 @@ class ProviderQuotaRouter:
                 if isinstance(provider, Provider):
                     provider_model = str(provider.get_model() or provider.provider_config.get("model") or "")
                 quota_key = self._quota_key(provider_id, provider_model)
-                usage = await self._usage(quota_key, window)
+                usage = await self._usage(quota_key, window, provider_id)
                 quota_managed = self.is_token_quota_managed(provider_id)
                 limit = chain.limit(self.settings.default_daily_limit_tokens) if quota_managed else 0
                 safety = chain.safety_buffer(self.settings.default_safety_buffer_tokens) if quota_managed else 0
@@ -329,16 +400,18 @@ class ProviderQuotaRouter:
                     if self.settings.provider_error_cooldown_enabled
                     else None
                 )
-                if cooldown and (
-                    (
-                        not quota_managed
-                        and not str(cooldown.get("reason") or "").startswith(
-                            "upstream_quota"
-                        )
+                is_upstream_cooldown = bool(
+                    cooldown
+                    and str(cooldown.get("reason") or "").startswith(
+                        "upstream_quota"
                     )
+                )
+                if cooldown and not is_upstream_cooldown and (
+                    not quota_managed
                     or (
                         cooldown.get("window_id") != window.window_id
-                        and float(cooldown.get("expires_at") or 0) <= time.time()
+                        and float(cooldown.get("expires_at") or 0)
+                        <= time.time()
                     )
                 ):
                     await self.state.clear_cooldown(quota_key=quota_key)
@@ -356,9 +429,6 @@ class ProviderQuotaRouter:
                     status = "provider_error_cooldown"
                 elif cooldown and str(cooldown.get("reason") or "").startswith(
                     "upstream_quota"
-                ) and (
-                    cooldown.get("window_id") == window.window_id
-                    or float(cooldown.get("expires_at") or 0) > time.time()
                 ):
                     status = "upstream_quota_cooldown"
                 elif not quota_managed:
@@ -400,6 +470,11 @@ class ProviderQuotaRouter:
                         "quota_managed": quota_managed,
                         "cooldown_started_at": display_cooldown.get("started_at") if display_cooldown else None,
                         "cooldown_until": display_cooldown.get("expires_at") if display_cooldown else None,
+                        "next_probe_at": (
+                            cooldown.get("next_probe_at")
+                            if is_upstream_cooldown and cooldown
+                            else None
+                        ),
                         "provider_error": (
                             model_circuit.get("last_error")
                             if model_circuit
@@ -464,51 +539,100 @@ class ProviderQuotaRouter:
             str(provider.provider_config.get("provider_source_id") or "")
         )
 
+    def policy_for(self, provider_id: str) -> ProviderPolicy | None:
+        provider = self.get_provider(provider_id)
+        if not isinstance(provider, Provider):
+            return None
+        return build_provider_policy(provider=provider, settings=self.settings)
+
+    def quota_key_for(self, provider_id: str, provider_model: str) -> str:
+        return self._quota_key(provider_id, provider_model)
+
+    def reservation_tokens_for(self, provider_id: str) -> int:
+        if not self.is_token_quota_managed(provider_id):
+            return 0
+        chain, _ = self._find_chain(provider_id)
+        return (
+            chain.reservation(
+                self.settings.default_request_reservation_tokens
+            )
+            if chain
+            else self.settings.default_request_reservation_tokens
+        )
+
     def is_token_quota_managed(self, provider_id: str) -> bool:
-        return self.is_volcengine_provider(provider_id)
+        policy = self.policy_for(provider_id)
+        return bool(policy and policy.manages_local_quota)
 
     async def volcengine_probe_candidate_ids(
         self, *, window: UsageWindow
     ) -> list[str]:
         result: list[str] = []
         seen: set[str] = set()
-        for chain in self.settings.chains:
-            for provider_id in chain.providers:
-                if provider_id in seen:
+        provider_ids: list[str] = []
+        if callable(self.get_all_providers):
+            try:
+                provider_ids = [
+                    str(provider.provider_config.get("id") or "")
+                    for provider in self.get_all_providers()
+                    if isinstance(provider, Provider)
+                ]
+            except Exception:  # noqa: BLE001
+                provider_ids = []
+        if not provider_ids:
+            provider_ids = [
+                provider_id
+                for chain in self.settings.chains
+                for provider_id in chain.providers
+            ]
+        for provider_id in provider_ids:
+            if provider_id in seen:
+                continue
+            seen.add(provider_id)
+            provider = self.get_provider(provider_id)
+            if not isinstance(provider, Provider):
+                continue
+            if not self.is_volcengine_provider(provider_id):
+                continue
+            if not self._supports_modalities(provider, {"text"}):
+                continue
+            model_circuit = await self.state.get_provider_model_circuit(
+                provider_id=provider_id
+            )
+            if model_circuit:
+                continue
+            provider_model = str(
+                provider.get_model()
+                or provider.provider_config.get("model")
+                or ""
+            )
+            quota_key = self._quota_key(provider_id, provider_model)
+            cooldown = await self.state.get_cooldown(quota_key=quota_key)
+            if cooldown:
+                same_window = cooldown.get("window_id") == window.window_id
+                active = float(cooldown.get("expires_at") or 0) > time.time()
+                if same_window or active:
                     continue
-                seen.add(provider_id)
-                provider = self.get_provider(provider_id)
-                if not isinstance(provider, Provider):
-                    continue
-                if not self.is_volcengine_provider(provider_id):
-                    continue
-                if not self._supports_modalities(provider, {"text"}):
-                    continue
-                provider_model = str(
-                    provider.get_model()
-                    or provider.provider_config.get("model")
-                    or ""
+                await self.state.clear_cooldown(quota_key=quota_key)
+            usage = await self._usage(quota_key, window, provider_id)
+            chain, _ = self._find_chain(provider_id)
+            quota_config = chain or ChainConfig(
+                name="source-probe-default",
+                providers=[provider_id],
+            )
+            projected = (
+                usage.effective_tokens
+                + quota_config.reservation(
+                    self.settings.default_request_reservation_tokens
                 )
-                quota_key = self._quota_key(provider_id, provider_model)
-                cooldown = await self.state.get_cooldown(quota_key=quota_key)
-                if cooldown:
-                    same_window = cooldown.get("window_id") == window.window_id
-                    active = float(cooldown.get("expires_at") or 0) > time.time()
-                    if same_window or active:
-                        continue
-                    await self.state.clear_cooldown(quota_key=quota_key)
-                usage = await self._usage(quota_key, window)
-                projected = (
-                    usage.effective_tokens
-                    + chain.reservation(
-                        self.settings.default_request_reservation_tokens
-                    )
-                    + chain.safety_buffer(
-                        self.settings.default_safety_buffer_tokens
-                    )
+                + quota_config.safety_buffer(
+                    self.settings.default_safety_buffer_tokens
                 )
-                if projected < chain.limit(self.settings.default_daily_limit_tokens):
-                    result.append(provider_id)
+            )
+            if projected < quota_config.limit(
+                self.settings.default_daily_limit_tokens
+            ):
+                result.append(provider_id)
         return result
 
     async def ensure_cooldown(
@@ -524,7 +648,7 @@ class ProviderQuotaRouter:
         if chain is None:
             return None
         quota_key = self._quota_key(provider_id, provider_model)
-        usage = await self._usage(quota_key, window)
+        usage = await self._usage(quota_key, window, provider_id)
         projected = (
             usage.effective_tokens
             + chain.reservation(self.settings.default_request_reservation_tokens)
@@ -584,11 +708,24 @@ class ProviderQuotaRouter:
             return provider_id
         return provider_model or provider_id
 
-    async def _usage(self, quota_key: str, window: UsageWindow) -> UsageRecord:
+    async def _usage(
+        self,
+        quota_key: str,
+        window: UsageWindow,
+        provider_id: str,
+    ) -> UsageRecord:
+        provider_scope: tuple[str, ...] | None = None
+        if self.settings.quota_key_mode == "provider_model":
+            provider_scope = (
+                self._local_quota_provider_ids()
+                if self.is_token_quota_managed(provider_id)
+                else (provider_id,)
+            )
         db_tokens = await self.ledger.query_usage(
             quota_key=quota_key,
             quota_key_mode=self.settings.quota_key_mode,
             window=window,
+            provider_ids=provider_scope,
         )
         pending_tokens, overlay_tokens = await self.state.usage_overlay(
             quota_key=quota_key,
@@ -599,6 +736,39 @@ class ProviderQuotaRouter:
             db_tokens=db_tokens,
             pending_tokens=pending_tokens,
             overlay_tokens=overlay_tokens,
+        )
+
+    def _local_quota_provider_ids(self) -> tuple[str, ...]:
+        providers: list[Provider] = []
+        if callable(self.get_all_providers):
+            try:
+                providers = [
+                    provider
+                    for provider in self.get_all_providers()
+                    if isinstance(provider, Provider)
+                ]
+            except Exception:  # noqa: BLE001
+                providers = []
+        if not providers:
+            providers = [
+                provider
+                for chain in self.settings.chains
+                for provider_id in chain.providers
+                if isinstance(
+                    (provider := self.get_provider(provider_id)),
+                    Provider,
+                )
+            ]
+        return tuple(
+            dict.fromkeys(
+                str(provider.provider_config.get("id") or "")
+                for provider in providers
+                if build_provider_policy(
+                    provider=provider,
+                    settings=self.settings,
+                ).manages_local_quota
+                and str(provider.provider_config.get("id") or "")
+            )
         )
 
     def _missing_state(

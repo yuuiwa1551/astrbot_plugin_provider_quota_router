@@ -217,3 +217,18 @@ deepseek/deepseek-v4-pro
 目标：避免多个故障 Provider 串行等待造成 Bot 长时间无响应，并修复引用消息内嵌图片未参与模态过滤的问题。
 
 状态：v0.11.2 已完成并同步实时 Docker 环境；容器内 55 项测试通过，全部 7 个实时 Provider 已逐个真实请求，WebChat 端到端链路在 10.25 秒内由 Mimo 返回，详见 `13期plan.md`。
+
+## 14期 三策略解耦与可靠故障降级
+
+目标：按真实计费语义拆分三套互不覆盖的策略：仅火山开发者计划使用本地日额度和达线后滚动 24 小时冷却；opencode free 只依据上游额度错误进入未知刷新状态并由后台探测恢复；所有 Provider 的真实上游故障使用独立模型健康冷却并快速 fallback。
+
+状态：v0.12.0 已完成并热重载到实时 AstrBot；容器内 79 项测试通过，v6 状态已迁移到 v7。火山 Source 恢复探测、付费 Token Plan WebChat、opencode free 直测和中转站故障短冷却均已实测，详见 `14期plan.md`。
+
+计划交付：
+
+- 新增不可变 ProviderPolicy、ErrorDisposition 和请求级 RoutePlan。
+- 拆分本地额度、上游未知刷新额度、模型健康、Source 健康四类持久状态。
+- 修复 `allow_paid/use_last` 非额度放行、实际 Provider 归因、probe 自阻断和热重载竞态。
+- opencode 不再假设北京时间 11:00 刷新，改为冷却期间用户请求零外呼、后台低频探测成功后恢复。
+- 请求级错误不污染全局模型状态；首响应墙钟预算继续限制坏模型造成的累计延迟。
+- 加入状态损坏备份、默认管理员授权、决策日志轮转和 AstrBot 真实契约测试。

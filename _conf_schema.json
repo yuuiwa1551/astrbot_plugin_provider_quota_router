@@ -73,7 +73,7 @@
     "description": "演练模式",
     "type": "bool",
     "hint": "开启后只记录决策，不实际切换 provider 或预占额度。",
-    "default": true
+    "default": false
   },
   "use_astrbot_fallback_chain": {
     "description": "使用 AstrBot 默认 fallback 链",
@@ -97,7 +97,7 @@
     "description": "接管 AstrBot 错误 fallback（兼容键）",
     "type": "bool",
     "hint": "开启后，AstrBot 当前请求只使用本插件按实时链、额度、冷却、熔断和模态过滤后的安全 fallback；不再清空全部后续模型。",
-    "default": false
+    "default": true
   },
   "quota_cooldown_seconds": {
     "description": "达到阈值后的冷却秒数",
@@ -114,13 +114,13 @@
   "upstream_quota_provider_prefixes": {
     "description": "按上游额度错误冷却的 Provider 前缀",
     "type": "list",
-    "hint": "匹配这些前缀的模型不套用火山 token 阈值；返回 FreeUsageLimitError 后仅冷却该模型到下一个每日重置时间。当前 opencode 使用 opencode-zen/。",
+    "hint": "匹配这些前缀的模型不套用火山 token 阈值；返回 FreeUsageLimitError 后冷却该模型，并按独立探测周期确认上游额度恢复。当前 opencode 使用 opencode-zen/。",
     "default": ["opencode-zen/"]
   },
   "volcengine_403_circuit_enabled": {
     "description": "启用火山 403 组级熔断",
     "type": "bool",
-    "hint": "任一火山模型返回 HTTP 403 后，临时跳过同一 provider source 下的全部火山模型。",
+    "hint": "火山开发者计划明确返回 AccountOverdueError 等账号级故障后，临时跳过同一 provider source 下的全部火山模型；普通请求级 403 不连坐。",
     "default": true
   },
   "volcengine_provider_source_ids": {
@@ -150,14 +150,20 @@
   "provider_error_cooldown_enabled": {
     "description": "启用单模型错误冷却",
     "type": "bool",
-    "hint": "任意模型调用最终失败后，只冷却该完整 Provider/模型配置，不影响同源其他模型。",
+    "hint": "Provider 瞬态或未知边界故障只冷却实际失败的完整 Provider/模型配置；请求级错误不写健康冷却。",
     "default": true
   },
   "provider_error_cooldown_seconds": {
     "description": "单模型错误冷却秒数",
     "type": "int",
-    "hint": "普通 Provider 调用失败后的独立冷却时间，默认 1800 秒（30 分钟）。到期后自动允许再次尝试。",
+    "hint": "超时、连接失败、429、5xx 等明确 Provider 瞬态故障的独立冷却时间，默认 1800 秒（30 分钟）。",
     "default": 1800
+  },
+  "unknown_provider_error_cooldown_seconds": {
+    "description": "未知 Provider 错误短冷却秒数",
+    "type": "int",
+    "hint": "无法明确分类、但看起来来自 Provider 的异常先短冷却，默认 300 秒；请求级 400/422、上下文和模态错误不会开启健康冷却。",
+    "default": 300
   },
   "provider_error_request_max_retries": {
     "description": "单模型请求最大尝试次数",
@@ -169,6 +175,24 @@
     "description": "单模型首响应超时秒数",
     "type": "int",
     "hint": "OpenAI-compatible 模型在该时间内没有返回首个响应就立即失败、冷却并切换。默认 20 秒；设为 0 关闭插件超时。",
+    "default": 20
+  },
+  "upstream_quota_probe_initial_delay_seconds": {
+    "description": "未知重置额度首次探测延迟",
+    "type": "int",
+    "hint": "opencode free 等未知刷新时刻的上游额度报错后，首次恢复探测前等待多少秒。默认 3600。",
+    "default": 3600
+  },
+  "upstream_quota_probe_interval_seconds": {
+    "description": "未知重置额度探测间隔",
+    "type": "int",
+    "hint": "额度尚未恢复时，后续最小探测间隔。默认 3600 秒。",
+    "default": 3600
+  },
+  "upstream_quota_probe_timeout_seconds": {
+    "description": "未知重置额度探测超时",
+    "type": "int",
+    "hint": "每次最小恢复探测最长等待时间。默认 20 秒。",
     "default": 20
   },
   "provider_error_admin_notify_enabled": {
@@ -204,7 +228,7 @@
   "admin_user_ids": {
     "description": "管理员用户 ID",
     "type": "list",
-    "hint": "为空时管理命令不受限，错误私聊使用 AstrBot 核心 admins_id；填写后同时作为命令管理员和错误通知目标。",
+    "hint": "为空时管理命令沿用 AstrBot 核心管理员权限；填写后这些 ID 作为额外命令管理员和错误通知目标。",
     "default": []
   },
   "exhausted_message": {

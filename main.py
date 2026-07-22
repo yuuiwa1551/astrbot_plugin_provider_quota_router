@@ -23,6 +23,7 @@ from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.star.filter.command import GreedyStr
 
 from .core.config import ChainConfig, RouterSettings
+from .core.error_classifier import classify_provider_error
 from .core.admin_alerts import build_provider_error_alert, resolve_admin_targets
 from .core.core_fallback_guard import (
     CORE_FALLBACK_APPLIED_EXTRA_KEY,
@@ -45,13 +46,18 @@ from .core.provider_errors import (
     is_http_403_error_text,
     is_provider_error_response,
     is_provider_error_text,
-    is_upstream_free_quota_exhausted_text,
     response_error_text,
 )
 from .core.opencode_quota_guard import (
+    begin_provider_guard_bypass,
+    bind_provider_guard_route_plan,
+    current_provider_guard_provider_id,
+    end_provider_guard_bypass,
     install_opencode_quota_guard,
+    reset_provider_guard_route_plan,
     uninstall_opencode_quota_guard,
 )
+from .core.policies import build_provider_policy, provider_identity
 from .core.reports import (
     build_alerts,
     build_summary,
@@ -59,13 +65,18 @@ from .core.reports import (
     read_recent_decisions,
     write_snapshot,
 )
-from .core.router import VOLCENGINE_GROUP_ID, ProviderQuotaRouter, decision_payload
+from .core.router import (
+    VOLCENGINE_GROUP_ID,
+    ProviderQuotaRouter,
+    RoutePlan,
+    decision_payload,
+)
 from .core.state import QuotaStateStore
 from .core.time_window import current_window, window_for_local_date
 
 
 PLUGIN_NAME = "astrbot_plugin_provider_quota_router"
-PLUGIN_VERSION = "0.11.1"
+PLUGIN_VERSION = "0.12.0"
 PLUGIN_REPOSITORY = "https://github.com/yuuiwa1551/astrbot_plugin_provider_quota_router"
 PLUGIN_DESCRIPTION = "按 provider/model 每日 token 额度自动降级路由 AstrBot 聊天模型。"
 HOOK_PRIORITY = 900
@@ -97,8 +108,12 @@ CONFIG_KEYS = {
     "volcengine_probe_timeout_seconds",
     "provider_error_cooldown_enabled",
     "provider_error_cooldown_seconds",
+    "unknown_provider_error_cooldown_seconds",
     "provider_error_request_max_retries",
     "provider_error_attempt_timeout_seconds",
+    "upstream_quota_probe_initial_delay_seconds",
+    "upstream_quota_probe_interval_seconds",
+    "upstream_quota_probe_timeout_seconds",
     "provider_error_admin_notify_enabled",
     "provider_error_admin_notify_interval_seconds",
     "provider_error_suppress_current_chat",
@@ -214,14 +229,12 @@ class ProviderQuotaRouterPlugin(Star):
             await asyncio.sleep(
                 self.settings.volcengine_probe_check_interval_seconds
             )
-            if (
-                not self.settings.enabled
-                or not self.settings.volcengine_403_circuit_enabled
-                or self.settings.dry_run
-            ):
+            if not self.settings.enabled or self.settings.dry_run:
                 continue
             try:
-                await self._probe_volcengine_if_due()
+                if self.settings.volcengine_403_circuit_enabled:
+                    await self._probe_volcengine_if_due()
+                await self._probe_upstream_quota_if_due()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -283,6 +296,7 @@ class ProviderQuotaRouterPlugin(Star):
             provider_id,
         )
         try:
+            bypass_token = begin_provider_guard_bypass("source")
             response = await asyncio.wait_for(
                 provider.text_chat(
                     prompt="连接测试：请只回复 OK。",
@@ -308,6 +322,9 @@ class ProviderQuotaRouterPlugin(Star):
                 exc,
             )
             return
+        finally:
+            if "bypass_token" in locals():
+                end_provider_guard_bypass(bypass_token)
 
         await self.state.finish_provider_group_probe(
             group_id=VOLCENGINE_GROUP_ID,
@@ -318,6 +335,67 @@ class ProviderQuotaRouterPlugin(Star):
             "[ProviderQuotaRouter] Volcengine half-open probe succeeded; circuit closed: provider=%s",
             provider_id,
         )
+
+    async def _probe_upstream_quota_if_due(self) -> None:
+        for due in await self.state.due_upstream_quota_probes():
+            quota_key = str(due.get("quota_key") or "")
+            provider_id = str(due.get("provider_id") or "")
+            if not quota_key or not provider_id:
+                continue
+            lease = await self.state.acquire_upstream_quota_probe(
+                quota_key=quota_key,
+                lease_seconds=self.settings.upstream_quota_probe_timeout_seconds
+                + 15,
+            )
+            if not lease:
+                continue
+            provider = self.context.get_provider_by_id(provider_id)
+            if provider is None:
+                await self.state.finish_upstream_quota_probe(
+                    quota_key=quota_key,
+                    success=False,
+                    error=f"探测 Provider 不存在: {provider_id}",
+                )
+                continue
+            bypass_token = begin_provider_guard_bypass("upstream_quota")
+            try:
+                response = await asyncio.wait_for(
+                    provider.text_chat(
+                        prompt="连接测试：请只回复 OK。",
+                        session_id=f"provider-quota-upstream-probe-{uuid.uuid4().hex}",
+                        request_max_retries=1,
+                    ),
+                    timeout=self.settings.upstream_quota_probe_timeout_seconds,
+                )
+                if getattr(response, "role", "") == "err":
+                    raise RuntimeError(
+                        str(
+                            getattr(response, "completion_text", "")
+                            or "模型返回错误"
+                        )
+                    )
+            except Exception as exc:  # noqa: BLE001
+                await self.state.finish_upstream_quota_probe(
+                    quota_key=quota_key,
+                    success=False,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                logger.info(
+                    "[ProviderQuotaRouter] upstream quota probe still blocked: provider=%s error=%s",
+                    provider_id,
+                    exc,
+                )
+            else:
+                await self.state.finish_upstream_quota_probe(
+                    quota_key=quota_key,
+                    success=True,
+                )
+                logger.warning(
+                    "[ProviderQuotaRouter] upstream quota probe succeeded; cooldown cleared: provider=%s",
+                    provider_id,
+                )
+            finally:
+                end_provider_guard_bypass(bypass_token)
 
     async def _reconcile_cooldowns_after_startup(self) -> None:
         for delay_seconds in (10, 20, 30):
@@ -442,7 +520,10 @@ class ProviderQuotaRouterPlugin(Star):
             )
 
     async def opencode_quota_guard_cooldown(
-        self, provider: Any
+        self,
+        provider: Any,
+        *,
+        bypass_scopes: frozenset[str] = frozenset(),
     ) -> dict[str, Any] | None:
         provider_id, provider_model = self._provider_identity(provider)
         if (
@@ -451,6 +532,8 @@ class ProviderQuotaRouterPlugin(Star):
         ):
             return None
         if (
+            "source" not in bypass_scopes
+            and
             self.settings.volcengine_403_circuit_enabled
             and self.router.is_volcengine_provider(provider_id)
         ):
@@ -459,13 +542,19 @@ class ProviderQuotaRouterPlugin(Star):
             )
             if group_circuit:
                 return group_circuit
-        if self.settings.provider_error_cooldown_enabled:
+        if (
+            "model" not in bypass_scopes
+            and self.settings.provider_error_cooldown_enabled
+        ):
             model_circuit = await self.state.get_provider_model_circuit(
                 provider_id=provider_id
             )
             if model_circuit:
                 return model_circuit
-        if not self.settings.is_upstream_quota_provider(provider_id):
+        if (
+            "upstream_quota" in bypass_scopes
+            or not self.settings.is_upstream_quota_provider(provider_id)
+        ):
             return None
         quota_key = self._quota_key(provider_id, provider_model)
         cooldown = await self.state.get_cooldown(quota_key=quota_key)
@@ -473,17 +562,7 @@ class ProviderQuotaRouterPlugin(Star):
             "upstream_quota"
         ):
             return None
-        window = current_window(
-            timezone_name=self.settings.timezone,
-            reset_time=self.settings.reset_time,
-        )
-        if (
-            cooldown.get("window_id") == window.window_id
-            or float(cooldown.get("expires_at") or 0) > time.time()
-        ):
-            return cooldown
-        await self.state.clear_cooldown(quota_key=quota_key)
-        return None
+        return cooldown
 
     def opencode_quota_guard_request_max_retries(self, provider: Any) -> int:
         return self.settings.provider_error_request_max_retries
@@ -498,36 +577,68 @@ class ProviderQuotaRouterPlugin(Star):
         error_text = f"{type(exc).__name__}: {exc}"
         if not self.settings.enabled or self.settings.dry_run:
             return
-        await self._start_provider_error_cooldown(
-            provider_id=provider_id,
-            provider_model=provider_model,
-            error_text=error_text,
-        )
-        await self._start_volcengine_403_circuit(
-            provider_id=provider_id,
-            error_text=error_text,
-        )
-        if (
-            self.settings.is_upstream_quota_provider(provider_id)
-            and is_upstream_free_quota_exhausted_text(error_text)
-        ):
+        policy = build_provider_policy(provider=provider, settings=self.settings)
+        disposition = classify_provider_error(error=exc, policy=policy)
+        if disposition.reason == "upstream_free_quota_exhausted":
             await self._start_upstream_quota_cooldown(
                 provider_id=provider_id,
                 provider_model=provider_model,
                 error_text=error_text,
             )
+        elif disposition.should_open_source:
+            await self._start_volcengine_403_circuit(
+                provider_id=provider_id,
+                error_text=error_text,
+                force=True,
+            )
+        elif disposition.should_cooldown_model:
+            await self._start_provider_error_cooldown(
+                provider_id=provider_id,
+                provider_model=provider_model,
+                error_text=error_text,
+                ttl_seconds=disposition.cooldown_seconds,
+            )
+
+    async def opencode_quota_guard_attempt(
+        self,
+        provider: Any,
+        route_plan: Any,
+    ) -> None:
+        if not isinstance(route_plan, RoutePlan):
+            return
+        router = route_plan.router
+        if router.state is not self.state:
+            return
+        provider_id, provider_model = self._provider_identity(provider)
+        if not provider_id:
+            return
+        reservation_tokens = router.reservation_tokens_for(provider_id)
+        await self.state.retarget_reservation(
+            request_id=route_plan.request_id,
+            window_id=route_plan.window.window_id,
+            quota_key=(
+                router.quota_key_for(provider_id, provider_model)
+                if reservation_tokens
+                else provider_id
+            ),
+            provider_id=provider_id,
+            provider_model=provider_model,
+            tokens=reservation_tokens,
+            ttl_seconds=route_plan.settings.reservation_ttl_seconds,
+        )
 
     async def _start_volcengine_403_circuit(
         self,
         *,
         provider_id: str,
         error_text: str,
+        force: bool = False,
     ) -> dict[str, Any] | None:
         if (
             self.settings.dry_run
             or not self.settings.volcengine_403_circuit_enabled
             or not self.router.is_volcengine_provider(provider_id)
-            or not is_http_403_error_text(error_text)
+            or (not force and not is_http_403_error_text(error_text))
         ):
             return None
         circuit = await self.state.open_provider_group_circuit(
@@ -537,7 +648,7 @@ class ProviderQuotaRouterPlugin(Star):
             error=error_text,
         )
         logger.error(
-            "[ProviderQuotaRouter] Volcengine HTTP 403 circuit opened: "
+            "[ProviderQuotaRouter] source account circuit opened: "
             "provider=%s retry_at=%s",
             provider_id,
             datetime.fromtimestamp(
@@ -552,17 +663,27 @@ class ProviderQuotaRouterPlugin(Star):
         provider_id: str,
         provider_model: str,
         error_text: str,
+        ttl_seconds: int | None = None,
     ) -> dict[str, Any] | None:
         if (
             self.settings.dry_run
             or not self.settings.provider_error_cooldown_enabled
             or not provider_id
+            or not int(
+                self.settings.provider_error_cooldown_seconds
+                if ttl_seconds is None
+                else ttl_seconds
+            )
         ):
             return None
         circuit = await self.state.open_provider_model_circuit(
             provider_id=provider_id,
             provider_model=provider_model,
-            ttl_seconds=self.settings.provider_error_cooldown_seconds,
+            ttl_seconds=int(
+                self.settings.provider_error_cooldown_seconds
+                if ttl_seconds is None
+                else ttl_seconds
+            ),
             error=error_text,
         )
         logger.warning(
@@ -591,33 +712,38 @@ class ProviderQuotaRouterPlugin(Star):
             timezone_name=self.settings.timezone,
             reset_time=self.settings.reset_time,
         )
-        cooldown = await self.state.set_cooldown_until(
+        cooldown = await self.state.start_upstream_quota_cooldown(
             quota_key=self._quota_key(provider_id, provider_model),
             window_id=window.window_id,
             provider_id=provider_id,
             provider_model=provider_model,
-            expires_at=window.end_local.timestamp(),
-            reason="upstream_quota_exhausted",
+            initial_delay_seconds=self.settings.upstream_quota_probe_initial_delay_seconds,
+            probe_interval_seconds=self.settings.upstream_quota_probe_interval_seconds,
+            error=error_text,
         )
         logger.warning(
-            "[ProviderQuotaRouter] opencode free quota cooldown active: provider=%s until=%s error=%s",
+            "[ProviderQuotaRouter] opencode free quota cooldown active: provider=%s next_probe_at=%s error=%s",
             provider_id,
-            window.end_local.isoformat(timespec="seconds"),
+            datetime.fromtimestamp(
+                float(cooldown.get("next_probe_at") or 0)
+            ).astimezone().isoformat(timespec="seconds"),
             " ".join(str(error_text or "").split())[:500],
         )
         return cooldown
 
     def _provider_identity(self, provider: Any) -> tuple[str, str]:
-        provider_config = getattr(provider, "provider_config", {}) or {}
-        provider_id = str(provider_config.get("id") or "")
-        try:
-            provider_model = str(provider.get_model() or "")
-        except Exception:  # noqa: BLE001
-            provider_model = ""
-        return provider_id, provider_model or str(provider_config.get("model") or "")
+        provider_id, _, provider_model = provider_identity(provider)
+        return provider_id, provider_model
 
-    def _quota_key(self, provider_id: str, provider_model: str) -> str:
-        if self.settings.quota_key_mode == "provider_id":
+    def _quota_key(
+        self,
+        provider_id: str,
+        provider_model: str,
+        *,
+        settings: RouterSettings | None = None,
+    ) -> str:
+        active_settings = settings or self.settings
+        if active_settings.quota_key_mode == "provider_id":
             return provider_id
         return provider_model or provider_id
 
@@ -689,6 +815,7 @@ class ProviderQuotaRouterPlugin(Star):
             ledger=self.ledger,
             state=self.state,
             get_provider=self.context.get_provider_by_id,
+            get_all_providers=self.context.get_all_providers,
         )
 
     def _reload_runtime_settings(self) -> None:
@@ -801,29 +928,32 @@ class ProviderQuotaRouterPlugin(Star):
         if not self.settings.enabled:
             return
         await self._refresh_fallback_config_if_changed()
+        router = self.router
+        settings = router.settings
         current_provider_id = self._current_provider_id(event)
         if not current_provider_id:
             return
         window = current_window(
-            timezone_name=self.settings.timezone,
-            reset_time=self.settings.reset_time,
+            timezone_name=settings.timezone,
+            reset_time=settings.reset_time,
         )
         required_modalities = self._required_modalities(event)
         request_id = self._request_id(event)
-        decision = await self.router.decide(
+        decision = await router.decide_and_reserve(
+            request_id=request_id,
             current_provider_id=current_provider_id,
             window=window,
             required_modalities=required_modalities,
         )
         safe_fallback_ids: list[str] = []
         safe_fallback_providers: list[Any] = []
-        if self._core_fallback_guard_active and not self.settings.dry_run:
+        if self._core_fallback_guard_active and not settings.dry_run:
             selected_provider_id = str(
                 decision.selected_provider_id or current_provider_id
             )
             if decision.action not in {"skip", "block"}:
                 safe_fallback_ids = (
-                    await self.router.eligible_fallback_provider_ids(
+                    await router.eligible_fallback_provider_ids(
                         selected_provider_id=selected_provider_id,
                         window=window,
                         required_modalities=required_modalities,
@@ -840,19 +970,35 @@ class ProviderQuotaRouterPlugin(Star):
             request_id=request_id,
             window=window,
             decision=decision,
-            dry_run=self.settings.dry_run,
+            dry_run=settings.dry_run,
         )
         payload["safe_fallback_provider_ids"] = safe_fallback_ids
         payload["request_max_retries"] = (
-            self.settings.provider_error_request_max_retries
-            if self._core_fallback_guard_active and not self.settings.dry_run
+            settings.provider_error_request_max_retries
+            if self._core_fallback_guard_active and not settings.dry_run
             else None
         )
         await self.state.record_decision(payload)
 
+        route_plan = RoutePlan(
+            request_id=request_id,
+            router=router,
+            settings=settings,
+            window=window,
+            required_modalities=frozenset(required_modalities),
+            decision=decision,
+            safe_fallback_provider_ids=tuple(safe_fallback_ids),
+        )
+
         if decision.action == "skip":
             return
-        if self._core_fallback_guard_active and not self.settings.dry_run:
+        route_plan_token = bind_provider_guard_route_plan(route_plan)
+        event.set_extra(
+            "provider_quota_router_route_plan_token",
+            route_plan_token,
+        )
+        event.set_extra("provider_quota_router_route_plan", route_plan)
+        if self._core_fallback_guard_active and not settings.dry_run:
             event.set_extra(CORE_FALLBACK_GUARD_EXTRA_KEY, True)
             event.set_extra(
                 CORE_FALLBACK_SAFE_PROVIDERS_EXTRA_KEY,
@@ -860,7 +1006,7 @@ class ProviderQuotaRouterPlugin(Star):
             )
             event.set_extra(
                 CORE_REQUEST_MAX_RETRIES_EXTRA_KEY,
-                self.settings.provider_error_request_max_retries,
+                settings.provider_error_request_max_retries,
             )
         event.set_extra("provider_quota_router_request_id", request_id)
         event.set_extra("provider_quota_router_decision", decision.action)
@@ -875,7 +1021,7 @@ class ProviderQuotaRouterPlugin(Star):
             return
 
         if decision.selected_provider_id and decision.action in {"switch", "use_last"}:
-            if not self.settings.dry_run:
+            if not settings.dry_run:
                 event.set_extra("selected_provider", decision.selected_provider_id)
             logger.info(
                 "[ProviderQuotaRouter] route %s -> %s action=%s reason=%s dry_run=%s",
@@ -883,18 +1029,7 @@ class ProviderQuotaRouterPlugin(Star):
                 decision.selected_provider_id,
                 decision.action,
                 decision.reason,
-                self.settings.dry_run,
-            )
-
-        if decision.should_reserve and not self.settings.dry_run:
-            await self.state.reserve(
-                request_id=request_id,
-                window_id=window.window_id,
-                quota_key=str(decision.selected_quota_key),
-                provider_id=str(decision.selected_provider_id or current_provider_id),
-                provider_model=self._provider_model(str(decision.selected_provider_id or current_provider_id)),
-                tokens=decision.reservation_tokens,
-                ttl_seconds=self.settings.reservation_ttl_seconds,
+                settings.dry_run,
             )
 
     @filter.on_llm_request(priority=HOOK_PRIORITY)
@@ -906,11 +1041,18 @@ class ProviderQuotaRouterPlugin(Star):
         if not self.settings.enabled:
             return
         if event.get_extra("provider_quota_router_blocked"):
-            message = self.settings.exhausted_message.format(
-                refresh_time=self.settings.reset_time,
+            route_plan = event.get_extra("provider_quota_router_route_plan")
+            settings = (
+                route_plan.settings
+                if isinstance(route_plan, RoutePlan)
+                else self.settings
+            )
+            message = settings.exhausted_message.format(
+                refresh_time=settings.reset_time,
             )
             await event.send(MessageChain().message(message))
             event.stop_event()
+            self._clear_provider_guard_route_plan(event)
             logger.info("[ProviderQuotaRouter] blocked LLM request: quota chain exhausted")
 
     @filter.on_agent_done(priority=HOOK_PRIORITY)
@@ -935,21 +1077,59 @@ class ProviderQuotaRouterPlugin(Star):
         request_id = str(event.get_extra("provider_quota_router_request_id") or "")
         if not request_id:
             return
+        route_plan = event.get_extra("provider_quota_router_route_plan")
+        router = (
+            route_plan.router
+            if isinstance(route_plan, RoutePlan)
+            else self.router
+        )
+        settings = (
+            route_plan.settings
+            if isinstance(route_plan, RoutePlan)
+            else self.settings
+        )
         usage = getattr(response, "usage", None)
         actual_tokens = int(getattr(usage, "total", 0) or 0) if usage else None
+        actual_provider_id = str(
+            getattr(response, "_provider_quota_router_provider_id", "")
+            or current_provider_guard_provider_id()
+            or event.get_extra("provider_quota_router_selected_provider_id")
+            or ""
+        )
+        actual_provider_model = self._provider_model(actual_provider_id)
+        actual_is_quota_managed = router.is_token_quota_managed(
+            actual_provider_id
+        )
+        overlay_tokens = actual_tokens if actual_is_quota_managed else None
         pending = await self.state.release(
             request_id=request_id,
-            actual_tokens=actual_tokens,
-            overlay_ttl_seconds=self.settings.overlay_ttl_seconds,
+            actual_tokens=overlay_tokens,
+            overlay_ttl_seconds=settings.overlay_ttl_seconds,
+            actual_provider_id=(
+                actual_provider_id if actual_is_quota_managed else None
+            ),
+            actual_provider_model=(
+                actual_provider_model if actual_is_quota_managed else None
+            ),
+            actual_quota_key=(
+                self._quota_key(
+                    actual_provider_id,
+                    actual_provider_model,
+                    settings=settings,
+                )
+                if actual_is_quota_managed
+                else None
+            ),
         )
         selected_provider_id = str(
-            (pending or {}).get("provider_id")
+            actual_provider_id
+            or (pending or {}).get("provider_id")
             or event.get_extra("provider_quota_router_selected_provider_id")
             or ""
         )
         if (
             selected_provider_id
-            and not self.settings.dry_run
+            and not settings.dry_run
             and is_provider_error_response(response)
         ):
             await self._handle_provider_error(
@@ -957,31 +1137,36 @@ class ProviderQuotaRouterPlugin(Star):
                 provider_id=selected_provider_id,
                 error_text=response_error_text(response),
             )
-        if pending and actual_tokens:
+        if pending and overlay_tokens:
             logger.info(
                 "[ProviderQuotaRouter] usage recorded: provider=%s quota_key=%s tokens=%s",
-                pending.get("provider_id"),
-                pending.get("quota_key"),
-                actual_tokens,
+                actual_provider_id,
+                self._quota_key(
+                    actual_provider_id,
+                    actual_provider_model,
+                    settings=settings,
+                ),
+                overlay_tokens,
             )
-        if pending:
-            cooldown = await self.router.ensure_cooldown(
-                provider_id=str(pending.get("provider_id") or ""),
-                provider_model=str(pending.get("provider_model") or ""),
+        if pending and actual_is_quota_managed:
+            cooldown = await router.ensure_cooldown(
+                provider_id=actual_provider_id,
+                provider_model=actual_provider_model,
                 window=current_window(
-                    timezone_name=self.settings.timezone,
-                    reset_time=self.settings.reset_time,
+                    timezone_name=settings.timezone,
+                    reset_time=settings.reset_time,
                 ),
             )
             if cooldown:
                 logger.warning(
                     "[ProviderQuotaRouter] quota cooldown active: provider=%s quota_key=%s until=%s",
-                    pending.get("provider_id"),
+                    actual_provider_id,
                     cooldown.get("quota_key"),
                     datetime.fromtimestamp(
                         float(cooldown.get("expires_at") or 0)
                     ).astimezone().isoformat(timespec="seconds"),
                 )
+        self._clear_provider_guard_route_plan(event)
 
     async def _handle_provider_error(
         self,
@@ -995,29 +1180,43 @@ class ProviderQuotaRouterPlugin(Star):
         event.set_extra("provider_quota_router_provider_error_handled", True)
         event.set_extra("provider_quota_router_suppress_provider_error", True)
         circuit: dict[str, Any] | None = None
-        model_circuit = await self._start_provider_error_cooldown(
-            provider_id=provider_id,
-            provider_model=self._provider_model(provider_id),
-            error_text=error_text,
-        )
+        model_circuit: dict[str, Any] | None = None
         upstream_cooldown: dict[str, Any] | None = None
-        circuit = await self._start_volcengine_403_circuit(
-            provider_id=provider_id,
-            error_text=error_text,
-        )
-        if (
-            self.settings.is_upstream_quota_provider(provider_id)
-            and is_upstream_free_quota_exhausted_text(error_text)
-        ):
+        provider = self.context.get_provider_by_id(provider_id)
+        if provider is not None:
+            policy = build_provider_policy(provider=provider, settings=self.settings)
+            disposition = classify_provider_error(
+                error=error_text,
+                policy=policy,
+            )
+        else:
+            disposition = None
+        if disposition and disposition.reason == "upstream_free_quota_exhausted":
             upstream_cooldown = await self._start_upstream_quota_cooldown(
                 provider_id=provider_id,
                 provider_model=self._provider_model(provider_id),
                 error_text=error_text,
             )
+        elif disposition and disposition.should_open_source:
+            circuit = await self._start_volcengine_403_circuit(
+                provider_id=provider_id,
+                error_text=error_text,
+                force=True,
+            )
+        elif disposition and disposition.should_cooldown_model:
+            model_circuit = await self._start_provider_error_cooldown(
+                provider_id=provider_id,
+                provider_model=self._provider_model(provider_id),
+                error_text=error_text,
+                ttl_seconds=disposition.cooldown_seconds,
+            )
         await self._notify_provider_error_admins(
             event=event,
             provider_id=provider_id,
             error_text=error_text,
+            error_kind=(
+                disposition.reason if disposition else "unclassified"
+            ),
             circuit=circuit,
             model_cooldown=upstream_cooldown or model_circuit,
         )
@@ -1028,6 +1227,7 @@ class ProviderQuotaRouterPlugin(Star):
         event: AstrMessageEvent,
         provider_id: str,
         error_text: str,
+        error_kind: str,
         circuit: dict[str, Any] | None,
         model_cooldown: dict[str, Any] | None,
     ) -> None:
@@ -1044,7 +1244,7 @@ class ProviderQuotaRouterPlugin(Star):
             )
             return
         claim = await self.state.claim_notification(
-            key="provider_error_admin_alert",
+            key=f"provider_error:{provider_id}:{error_kind}",
             interval_seconds=self.settings.provider_error_admin_notify_interval_seconds,
             detail=f"{provider_id}: {error_text}",
         )
@@ -1092,14 +1292,22 @@ class ProviderQuotaRouterPlugin(Star):
             sent,
             len(targets),
         )
+        if sent == 0:
+            await self.state.release_notification_claim(
+                key=f"provider_error:{provider_id}:{error_kind}",
+                claimed_at=float(claim.get("claimed_at") or 0),
+            )
 
     @filter.on_decorating_result(priority=HOOK_PRIORITY)
     async def suppress_provider_error_result(self, event: AstrMessageEvent) -> None:
         if not self.settings.enabled or self.settings.dry_run:
+            self._clear_provider_guard_route_plan(event)
             return
         result = event.get_result()
         selected_provider_id = str(
-            event.get_extra("provider_quota_router_selected_provider_id") or ""
+            current_provider_guard_provider_id()
+            or event.get_extra("provider_quota_router_selected_provider_id")
+            or ""
         )
         result_text = ""
         if result is not None:
@@ -1130,6 +1338,7 @@ class ProviderQuotaRouterPlugin(Star):
             not self.settings.provider_error_suppress_current_chat
             or not event.get_extra("provider_quota_router_suppress_provider_error")
         ):
+            self._clear_provider_guard_route_plan(event)
             return
         if result is not None:
             result.chain.clear()
@@ -1138,6 +1347,7 @@ class ProviderQuotaRouterPlugin(Star):
             "[ProviderQuotaRouter] provider error reply suppressed in source conversation: %s",
             event.unified_msg_origin,
         )
+        self._clear_provider_guard_route_plan(event)
 
     @filter.command("quota", desc="查看或管理 provider/model token 额度路由。")
     async def quota_command(self, event: AstrMessageEvent, args: GreedyStr = ""):
@@ -1300,6 +1510,10 @@ class ProviderQuotaRouterPlugin(Star):
                 cooldown_text = " cooldown_until=" + datetime.fromtimestamp(
                     float(row["cooldown_until"])
                 ).astimezone().isoformat(timespec="seconds")
+            elif row.get("next_probe_at"):
+                cooldown_text = " next_probe_at=" + datetime.fromtimestamp(
+                    float(row["next_probe_at"])
+                ).astimezone().isoformat(timespec="seconds")
             lines.append(
                 "{status} {provider_id} model={model} used={used}/{limit} pending={pending} overlay={overlay}{cooldown}".format(
                     status=row["status"],
@@ -1331,9 +1545,18 @@ class ProviderQuotaRouterPlugin(Star):
             "rows": rows,
             "alerts": alerts,
             "state": {
+                "version": state.get("version"),
                 "pending_count": len(state.get("pending", {}) or {}),
                 "overlay_count": len(state.get("overlays", []) or []),
                 "cooldown_count": len(state.get("cooldowns", {}) or {}),
+                "local_quota_cooldown_count": len(
+                    state.get("local_quota_cooldowns", {}) or {}
+                ),
+                "upstream_quota_cooldown_count": len(
+                    state.get("upstream_quota_cooldowns", {}) or {}
+                ),
+                "state_load_error": self.state.last_load_error,
+                "state_corrupt_backup": self.state.last_corrupt_backup,
                 "provider_model_circuit_count": len(
                     state.get("provider_model_circuits", {}) or {}
                 ),
@@ -1393,8 +1616,12 @@ class ProviderQuotaRouterPlugin(Star):
             "volcengine_probe_timeout_seconds": self.settings.volcengine_probe_timeout_seconds,
             "provider_error_cooldown_enabled": self.settings.provider_error_cooldown_enabled,
             "provider_error_cooldown_seconds": self.settings.provider_error_cooldown_seconds,
+            "unknown_provider_error_cooldown_seconds": self.settings.unknown_provider_error_cooldown_seconds,
             "provider_error_request_max_retries": self.settings.provider_error_request_max_retries,
             "provider_error_attempt_timeout_seconds": self.settings.provider_error_attempt_timeout_seconds,
+            "upstream_quota_probe_initial_delay_seconds": self.settings.upstream_quota_probe_initial_delay_seconds,
+            "upstream_quota_probe_interval_seconds": self.settings.upstream_quota_probe_interval_seconds,
+            "upstream_quota_probe_timeout_seconds": self.settings.upstream_quota_probe_timeout_seconds,
             "provider_error_admin_notify_enabled": self.settings.provider_error_admin_notify_enabled,
             "provider_error_admin_notify_interval_seconds": self.settings.provider_error_admin_notify_interval_seconds,
             "provider_error_suppress_current_chat": self.settings.provider_error_suppress_current_chat,
@@ -1518,14 +1745,28 @@ class ProviderQuotaRouterPlugin(Star):
     def _can_view_status(self, event: AstrMessageEvent) -> bool:
         return self.settings.allow_status_for_all or self._is_admin(event)
 
+    @staticmethod
+    def _clear_provider_guard_route_plan(event: AstrMessageEvent) -> None:
+        token = event.get_extra("provider_quota_router_route_plan_token")
+        if token is None:
+            return
+        try:
+            reset_provider_guard_route_plan(token)
+        except (RuntimeError, ValueError):
+            pass
+        event.set_extra("provider_quota_router_route_plan_token", None)
+
     def _is_admin(self, event: AstrMessageEvent) -> bool:
-        if not self.settings.admin_user_ids:
-            return True
         try:
             sender_id = event.get_sender_id()
         except Exception:  # noqa: BLE001
             sender_id = ""
-        return str(sender_id) in self.settings.admin_user_ids
+        if str(sender_id) in self.settings.admin_user_ids:
+            return True
+        try:
+            return bool(event.is_admin())
+        except Exception:  # noqa: BLE001
+            return False
 
 
 def _format_tokens(value: int) -> str:

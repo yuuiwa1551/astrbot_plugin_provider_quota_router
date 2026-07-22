@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -8,6 +9,20 @@ from core.state import QuotaStateStore
 
 
 class StateCooldownTests(unittest.IsolatedAsyncioTestCase):
+    async def test_corrupt_state_is_backed_up_and_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "quota_state.json"
+            state_path.write_text("{broken", encoding="utf-8")
+            store = QuotaStateStore(Path(temp_dir))
+
+            snapshot = await store.snapshot()
+
+            self.assertEqual(snapshot["pending"], {})
+            self.assertIsNotNone(store.last_load_error)
+            self.assertIsNotNone(store.last_corrupt_backup)
+            self.assertTrue(Path(str(store.last_corrupt_backup)).exists())
+            self.assertEqual(state_path.read_text(encoding="utf-8"), "{broken")
+
     async def test_provider_model_circuit_is_isolated_persistent_and_expires(
         self,
     ) -> None:
@@ -90,6 +105,19 @@ class StateCooldownTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertIsNone(after_reset)
 
+            released = await reloaded.release_notification_claim(
+                key="provider_error_admin_alert",
+                claimed_at=float(first["claimed_at"]),
+            )
+            self.assertTrue(released)
+            self.assertIsNotNone(
+                await reloaded.claim_notification(
+                    key="provider_error_admin_alert",
+                    interval_seconds=3_600,
+                    detail="retry after all sends failed",
+                )
+            )
+
     async def test_provider_group_circuit_persists_and_probe_controls_recovery(
         self,
     ) -> None:
@@ -166,21 +194,52 @@ class StateCooldownTests(unittest.IsolatedAsyncioTestCase):
             after_reset = await reloaded.get_cooldown(quota_key="doubao-model")
             self.assertIsNotNone(after_reset)
 
-    async def test_upstream_quota_cooldown_uses_absolute_reset_boundary(self) -> None:
+    async def test_reservation_can_move_to_actual_fallback_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = QuotaStateStore(Path(temp_dir))
-            reset_at = 1_900_000_000.0
-            created = await store.set_cooldown_until(
+            await store.reserve(
+                request_id="request-a",
+                window_id="window-a",
+                quota_key="local-model",
+                provider_id="openai/local-model",
+                provider_model="local-model",
+                tokens=50_000,
+                ttl_seconds=1800,
+            )
+
+            await store.retarget_reservation(
+                request_id="request-a",
+                window_id="window-a",
+                quota_key="relay/model",
+                provider_id="relay/model",
+                provider_model="model",
+                tokens=0,
+                ttl_seconds=1800,
+            )
+            pending = (await store.snapshot())["pending"]["request-a"]
+
+            self.assertEqual(pending["provider_id"], "relay/model")
+            self.assertEqual(pending["tokens"], 0)
+
+    async def test_upstream_quota_cooldown_uses_unknown_reset_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = QuotaStateStore(Path(temp_dir))
+            created = await store.start_upstream_quota_cooldown(
                 quota_key="mimo-v2.5-free",
                 window_id="window-a",
                 provider_id="opencode-zen/mimo-v2.5-free",
                 provider_model="mimo-v2.5-free",
-                expires_at=reset_at,
-                reason="upstream_quota_exhausted",
+                initial_delay_seconds=3600,
+                probe_interval_seconds=3600,
+                error="FreeUsageLimitError",
             )
 
-            self.assertEqual(created["expires_at"], reset_at)
-            self.assertEqual(created["reason"], "upstream_quota_exhausted")
+            self.assertIsNone(created["expires_at"])
+            self.assertEqual(
+                created["reason"],
+                "upstream_quota_exhausted_unknown_reset",
+            )
+            self.assertGreater(created["next_probe_at"], created["started_at"])
 
     async def test_clears_old_opencode_token_cooldown(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -219,7 +278,45 @@ class StateCooldownTests(unittest.IsolatedAsyncioTestCase):
             cooldown = await store.get_cooldown(quota_key="mimo-v2.5-free")
 
             self.assertEqual(changed, 0)
-            self.assertEqual(cooldown["reason"], "upstream_quota_exhausted")
+            self.assertEqual(
+                cooldown["reason"],
+                "upstream_quota_exhausted_unknown_reset",
+            )
+
+    async def test_upstream_probe_lease_and_success_clear_cooldown(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = QuotaStateStore(Path(temp_dir))
+            await store.start_upstream_quota_cooldown(
+                quota_key="free-model",
+                window_id="window-a",
+                provider_id="opencode-zen/free-model",
+                provider_model="free-model",
+                initial_delay_seconds=60,
+                probe_interval_seconds=60,
+                error="FreeUsageLimitError",
+            )
+            state = store._load_state()
+            state["upstream_quota_cooldowns"]["free-model"][
+                "next_probe_at"
+            ] = time.time() - 1
+            store._save_state(state)
+
+            probe = await store.acquire_upstream_quota_probe(
+                quota_key="free-model",
+                lease_seconds=30,
+            )
+            self.assertIsNotNone(probe)
+            self.assertIsNone(
+                await store.acquire_upstream_quota_probe(
+                    quota_key="free-model",
+                    lease_seconds=30,
+                )
+            )
+            await store.finish_upstream_quota_probe(
+                quota_key="free-model",
+                success=True,
+            )
+            self.assertIsNone(await store.get_cooldown(quota_key="free-model"))
 
 
 if __name__ == "__main__":

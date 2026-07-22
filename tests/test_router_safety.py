@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import tempfile
 import unittest
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -12,6 +15,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - host test environment
 
 from core.config import ChainConfig, RouterSettings
 from core.router import ProviderQuotaRouter
+from core.state import QuotaStateStore
 
 
 class FakeLedger:
@@ -28,6 +32,15 @@ class MapLedger:
 
     async def query_usage(self, **kwargs) -> int:
         return self.tokens.get(kwargs["quota_key"], 0)
+
+
+class CapturingLedger:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def query_usage(self, **kwargs) -> int:
+        self.calls.append(kwargs)
+        return 0
 
 
 class FakeState:
@@ -86,6 +99,91 @@ def make_provider(
 
 
 class RouterSafetyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_concurrent_decisions_reserve_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            provider_id = "openai/local"
+            providers = {
+                provider_id: make_provider(provider_id, ["text"], "openai")
+            }
+            router = ProviderQuotaRouter(
+                settings=RouterSettings(
+                    default_daily_limit_tokens=100,
+                    default_safety_buffer_tokens=0,
+                    default_request_reservation_tokens=60,
+                    chains=[
+                        ChainConfig(name="test", providers=[provider_id])
+                    ],
+                ),
+                ledger=FakeLedger(0),
+                state=QuotaStateStore(Path(temp_dir)),
+                get_provider=providers.get,
+            )
+
+            decisions = await asyncio.gather(
+                router.decide_and_reserve(
+                    request_id="request-a",
+                    current_provider_id=provider_id,
+                    window=SimpleNamespace(window_id="window-a"),
+                ),
+                router.decide_and_reserve(
+                    request_id="request-b",
+                    current_provider_id=provider_id,
+                    window=SimpleNamespace(window_id="window-a"),
+                ),
+            )
+
+            self.assertEqual(
+                sorted(decision.action for decision in decisions),
+                ["allow", "block"],
+            )
+
+    async def test_model_quota_query_is_scoped_to_local_plan_providers(self) -> None:
+        local_a = make_provider("openai/local-a", ["text"], "openai")
+        local_b = make_provider("openai/local-b", ["text"], "openai")
+        paid = make_provider(
+            "volcengine-agent-plan/paid",
+            ["text"],
+            "volcengine-agent-plan",
+        )
+        for provider in (local_a, local_b, paid):
+            provider.get_model.return_value = "same-model"
+            provider.provider_config["model"] = "same-model"
+        providers = {
+            provider.provider_config["id"]: provider
+            for provider in (local_a, local_b, paid)
+        }
+        ledger = CapturingLedger()
+        router = ProviderQuotaRouter(
+            settings=RouterSettings(
+                default_safety_buffer_tokens=0,
+                default_request_reservation_tokens=0,
+                chains=[
+                    ChainConfig(
+                        name="test",
+                        providers=list(providers),
+                    )
+                ],
+            ),
+            ledger=ledger,
+            state=FakeState(),
+            get_provider=providers.get,
+            get_all_providers=lambda: list(providers.values()),
+        )
+
+        await router.decide(
+            current_provider_id="openai/local-a",
+            window=SimpleNamespace(window_id="window-a"),
+        )
+
+        self.assertEqual(
+            ledger.calls[0]["provider_ids"],
+            ("openai/local-a", "openai/local-b"),
+        )
+        self.assertNotIn(
+            "volcengine-agent-plan/paid",
+            ledger.calls[0]["provider_ids"],
+        )
+
     async def test_provider_error_cooldown_only_skips_the_failed_model(self) -> None:
         providers = {
             "relay/model-a": make_provider("relay/model-a", ["text"], "relay"),
@@ -229,6 +327,39 @@ class RouterSafetyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(candidates, ["openai/doubao-safe"])
 
+    async def test_probe_candidates_can_come_from_source_outside_chain(self) -> None:
+        providers = {
+            "opencode-zen/free": make_provider(
+                "opencode-zen/free", ["text"], "opencode-zen"
+            ),
+            "openai/source-probe": make_provider(
+                "openai/source-probe", ["text"], "openai"
+            ),
+        }
+        router = ProviderQuotaRouter(
+            settings=RouterSettings(
+                default_daily_limit_tokens=100,
+                default_safety_buffer_tokens=0,
+                default_request_reservation_tokens=0,
+                chains=[
+                    ChainConfig(
+                        name="test",
+                        providers=["opencode-zen/free"],
+                    )
+                ],
+            ),
+            ledger=MapLedger({"openai/source-probe": 10}),
+            state=FakeState(),
+            get_provider=providers.get,
+            get_all_providers=lambda: list(providers.values()),
+        )
+
+        candidates = await router.volcengine_probe_candidate_ids(
+            window=SimpleNamespace(window_id="window-a")
+        )
+
+        self.assertEqual(candidates, ["openai/source-probe"])
+
     async def test_strict_priority_restarts_from_chain_head(self) -> None:
         providers = {
             "provider-a": make_provider("provider-a", ["text"]),
@@ -311,6 +442,59 @@ class RouterSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.action, "block")
         self.assertEqual(decision.reason, "chain_unavailable")
         self.assertIsNone(decision.selected_provider_id)
+
+    async def test_allow_paid_does_not_bypass_modality_failures(self) -> None:
+        providers = {
+            "provider-a": make_provider("provider-a", ["text"], "openai"),
+            "provider-b": make_provider("provider-b", ["text"], "openai"),
+        }
+        router = ProviderQuotaRouter(
+            settings=RouterSettings(
+                exhausted_action="allow_paid",
+                chains=[ChainConfig(name="test", providers=list(providers))],
+            ),
+            ledger=FakeLedger(0),
+            state=FakeState(),
+            get_provider=providers.get,
+        )
+
+        decision = await router.decide(
+            current_provider_id="provider-b",
+            window=SimpleNamespace(window_id="test-window"),
+            required_modalities={"image"},
+        )
+
+        self.assertEqual(decision.action, "block")
+        self.assertEqual(decision.reason, "chain_unavailable")
+        self.assertIsNone(decision.selected_provider_id)
+
+    async def test_allow_paid_uses_the_original_provider_quota_key(self) -> None:
+        providers = {
+            "provider-a": make_provider("provider-a", ["text"], "openai"),
+            "provider-b": make_provider("provider-b", ["text"], "openai"),
+        }
+        router = ProviderQuotaRouter(
+            settings=RouterSettings(
+                default_daily_limit_tokens=100,
+                default_safety_buffer_tokens=0,
+                default_request_reservation_tokens=7,
+                exhausted_action="allow_paid",
+                chains=[ChainConfig(name="test", providers=list(providers))],
+            ),
+            ledger=FakeLedger(100),
+            state=FakeState(),
+            get_provider=providers.get,
+        )
+
+        decision = await router.decide(
+            current_provider_id="provider-b",
+            window=SimpleNamespace(window_id="test-window"),
+        )
+
+        self.assertEqual(decision.action, "paid_risk")
+        self.assertEqual(decision.selected_provider_id, "provider-b")
+        self.assertEqual(decision.selected_quota_key, "provider-b")
+        self.assertEqual(decision.reservation_tokens, 7)
 
     async def test_use_last_remains_available_for_quota_only_exhaustion(self) -> None:
         providers = {
@@ -426,6 +610,21 @@ class RouterSafetyTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             cooling.candidates[0].reason, "upstream_quota_cooldown"
+        )
+
+        state.cooldowns[provider_id].update(
+            {
+                "window_id": "window-old",
+                "expires_at": time.time() - 1,
+            }
+        )
+        still_cooling = await router.decide(
+            current_provider_id=provider_id,
+            window=SimpleNamespace(window_id="window-new"),
+        )
+        self.assertEqual(
+            still_cooling.candidates[0].reason,
+            "upstream_quota_cooldown",
         )
 
     async def test_non_volcengine_provider_ignores_token_threshold(self) -> None:

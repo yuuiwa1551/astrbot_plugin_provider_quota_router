@@ -1,5 +1,18 @@
 # AstrBot Provider Quota Router Spec
 
+## v0.12.0 当前契约
+
+- 独立源码仓库：`D:\astrbot\tmp_provider_quota_router_repo`；实时 Docker 数据根：`D:\astrbot\data -> /AstrBot/data`。不得把 `C:\Users\Administrator\astrbot` 当作当前运行目录。
+- 只有 `provider_source_id=openai` 命中的火山开发者计划使用本地日 token 保护；`volcengine-agent-plan/*`、中转站、DeepSeek 和其他 Token Plan 不参与该阈值。
+- 火山本地统计窗口仍在北京时间 11:00 切换；达到安全线后从达线时刻滚动冷却 24 小时，跨过 11:00 不提前恢复。
+- `opencode-zen/*-free` 只在上游明确返回 `FreeUsageLimitError` 后进入未知刷新额度状态；用户请求零外呼，后台持久化 lease 探测成功后恢复，不再假设 11:00。
+- Provider 故障先分类：超时、连接、408、普通 429、5xx 冷却实际失败模型 1800 秒；未知边界异常冷却 300 秒；400/422、上下文、模态、工具、附件和内容审核错误不写健康状态。
+- 只有火山开发者计划明确账号级错误才允许打开 Source 熔断；普通请求级 403 不连坐整个 Source。
+- `provider_model` 额度查询必须同时限定到本地额度策略命中的 Provider ID，禁止把付费 Token Plan 的同名模型计入免费计划。
+- 每条请求使用不可变 RoutePlan；额度判断与 reservation 在 StateStore 共享临界区内原子完成，热重载产生的新旧 router 也不能并发双放行。
+- `allow_paid/use_last` 只能绕过火山本地额度，不能绕过缺失、模态、模型健康、Source 熔断或上游硬额度。
+- 下文保留最初 MVP 的背景和演进依据；凡与本节冲突，以本节和 `14期plan.md` 为准。
+
 ## 背景
 
 火山引擎开发者活动存在“单一模型每日免费 token 额度”的使用边界。当前目标不是做群聊或用户限额，而是在 AstrBot 内部按 provider/model 维度监控全局 token 消耗，并在某个模型达到配置阈值后，将后续会落到该 provider 的请求自动路由到优先级更低的 provider。
@@ -8,7 +21,7 @@
 
 ## 当前环境确认
 
-- Windows 运行目录：`C:\Users\Administrator\astrbot`。
+- Windows 实时数据目录：`D:\astrbot\data`；源码仓库：`D:\astrbot\tmp_provider_quota_router_repo`。
 - Docker 服务：`astrbot` 容器运行 `soulter/astrbot:latest`，暴露 `6185`；`napcat` 容器暴露 `6099`。
 - 挂载关系：`./data` 挂载到容器内 `/AstrBot/data`。
 - AstrBot 源码位于容器内 `/AstrBot/astrbot`。
