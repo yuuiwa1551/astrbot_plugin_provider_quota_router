@@ -1,6 +1,6 @@
 # AstrBot Provider Quota Router Spec
 
-## v0.12.1 当前契约
+## v0.12.2 当前契约
 
 - 独立源码仓库：`D:\astrbot\tmp_provider_quota_router_repo`；实时 Docker 数据根：`D:\astrbot\data -> /AstrBot/data`。不得把 `C:\Users\Administrator\astrbot` 当作当前运行目录。
 - 只有 `provider_source_id=openai` 命中的火山开发者计划使用本地日 token 保护；`volcengine-agent-plan/*`、中转站、DeepSeek 和其他 Token Plan 不参与该阈值。
@@ -10,8 +10,9 @@
 - 只有火山开发者计划明确账号级错误才允许打开 Source 熔断；普通请求级 403 不连坐整个 Source。
 - `provider_model` 额度查询必须同时限定到本地额度策略命中的 Provider ID，禁止把付费 Token Plan 的同名模型计入免费计划。
 - 每条请求使用不可变 RoutePlan；额度判断与 reservation 在 StateStore 共享临界区内原子完成，热重载产生的新旧 router 也不能并发双放行。
+- 只有插件实际执行 `switch/use_last` 且目标 Provider 与原 Provider 不同时，才输出“本次对话已由插件路由”INFO 日志；必须包含 conversation origin、原 Provider/模型、目标 Provider/模型、动作、原模型跳过原因 `trigger` 和目标状态 `target_status`。普通放行和同 Provider `use_last` 不输出，dry-run 不得冒充真实切换。
 - `allow_paid/use_last` 只能绕过火山本地额度，不能绕过缺失、模态、模型健康、Source 熔断或上游硬额度。
-- 下文保留最初 MVP 的背景和演进依据；凡与本节冲突，以本节、`14期plan.md` 和 `15期plan.md` 为准。
+- 下文保留最初 MVP 的背景和演进依据；凡与本节冲突，以本节、`14期plan.md`、`15期plan.md` 和 `16期plan.md` 为准。
 
 ## 背景
 

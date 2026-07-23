@@ -72,6 +72,7 @@ from .core.reports import (
 from .core.router import (
     VOLCENGINE_GROUP_ID,
     ProviderQuotaRouter,
+    RouteDecision,
     RoutePlan,
     decision_payload,
 )
@@ -80,7 +81,7 @@ from .core.time_window import current_window, window_for_local_date
 
 
 PLUGIN_NAME = "astrbot_plugin_provider_quota_router"
-PLUGIN_VERSION = "0.12.1"
+PLUGIN_VERSION = "0.12.2"
 PLUGIN_REPOSITORY = "https://github.com/yuuiwa1551/astrbot_plugin_provider_quota_router"
 PLUGIN_DESCRIPTION = "按 provider/model 每日 token 额度自动降级路由 AstrBot 聊天模型。"
 HOOK_PRIORITY = 900
@@ -1074,14 +1075,64 @@ class ProviderQuotaRouterPlugin(Star):
         if decision.selected_provider_id and decision.action in {"switch", "use_last"}:
             if not settings.dry_run:
                 event.set_extra("selected_provider", decision.selected_provider_id)
-            logger.info(
-                "[ProviderQuotaRouter] route %s -> %s action=%s reason=%s dry_run=%s",
-                decision.original_provider_id,
-                decision.selected_provider_id,
-                decision.action,
-                decision.reason,
-                settings.dry_run,
-            )
+                self._log_applied_route(
+                    event=event,
+                    decision=decision,
+                )
+            else:
+                logger.info(
+                    "[ProviderQuotaRouter] dry-run route candidate: "
+                    "from_provider=%s to_provider=%s action=%s reason=%s",
+                    decision.original_provider_id,
+                    decision.selected_provider_id,
+                    decision.action,
+                    decision.reason,
+                )
+
+    def _log_applied_route(
+        self,
+        *,
+        event: AstrMessageEvent,
+        decision: RouteDecision,
+    ) -> bool:
+        source_provider_id = str(decision.original_provider_id or "")
+        target_provider_id = str(decision.selected_provider_id or "")
+        if (
+            decision.action not in {"switch", "use_last"}
+            or not target_provider_id
+            or source_provider_id == target_provider_id
+        ):
+            return False
+        source_model = self._provider_model(source_provider_id) or "unknown"
+        target_model = self._provider_model(target_provider_id) or "unknown"
+        source_state = next(
+            (
+                state
+                for state in decision.candidates
+                if state.provider_id == source_provider_id
+            ),
+            None,
+        )
+        trigger = (
+            str(source_state.reason)
+            if source_state is not None
+            else str(decision.reason)
+        )
+        logger.info(
+            "[ProviderQuotaRouter] 本次对话已由插件路由: "
+            "conversation=%s from_provider=%s from_model=%s "
+            "to_provider=%s to_model=%s action=%s "
+            "trigger=%s target_status=%s",
+            event.unified_msg_origin,
+            source_provider_id,
+            source_model,
+            target_provider_id,
+            target_model,
+            decision.action,
+            trigger,
+            decision.reason,
+        )
+        return True
 
     @filter.on_llm_request(priority=HOOK_PRIORITY)
     async def on_llm_request(

@@ -246,3 +246,16 @@ deepseek/deepseek-v4-pro
 - 同一 Provider 默认 5 分钟内连续两次本地超时才短冷却 5 分钟；成功响应重置连续计数。
 - 真实超时、连接、408、普通 429、5xx 保持立即冷却 30 分钟。
 - 用 2026-07-23 的 GLM 5.2、Doubao 2.0 Mini 实时日志和绕过插件直测验证判定。
+
+## 16期 对话路由模型平台日志
+
+目标：当插件确实改变本次对话的 Provider 时，让平台日志直接显示原模型和目标模型，避免只能根据 Provider ID 或相邻日志猜测。
+
+状态：v0.12.2 已完成并部署到实时 AstrBot；容器内 92 项测试通过，真实 WebChat 受控路由日志准确显示 GLM 5.2 切换到 DeepSeek V4 Flash Free、原模型冷却原因和目标状态，详见 `16期plan.md`。
+
+计划交付：
+
+- 只对实际切换到不同 Provider 的 `switch/use_last` 输出统一 INFO 日志。
+- 日志包含 conversation origin、原 Provider/模型、目标 Provider/模型、动作、原模型跳过原因和目标状态。
+- 普通放行请求不刷路由日志，dry-run 使用不同文案。
+- 使用容器单元测试与实时路由触发验证平台日志。
