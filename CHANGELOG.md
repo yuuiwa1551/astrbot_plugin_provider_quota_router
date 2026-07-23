@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.12.1
+
+- 将插件自己的 20 秒首响应墙钟预算与真实 Provider 超时拆分：本地预算耗尽只终止当前尝试并 fallback，不再第一次就污染全局模型健康 30 分钟。
+- 同一 Provider 默认在 5 分钟内连续两次本地首响应超时才短冷却 5 分钟；任一次成功响应都会清零连续计数。
+- Provider/SDK 自己抛出的超时、连接失败、408、普通 429 和 5xx 仍立即进入原有 30 分钟模型健康冷却。
+- 修复 `asyncio.wait_for` 把上游原生 `TimeoutError` 误包装成本地预算超时的问题，并兼容 AstrBot 序列化后的 `ProviderAttemptTimeoutError` 文本。
+- 增加连续阈值、统计窗口和短冷却三个可配置项，并补充实时日志审计与回归测试。
+- 版本统一为 0.12.1。
+
 ## v0.12.0
 
 - 新增不可变 `ProviderPolicy`、`ErrorDisposition` 和请求级 `RoutePlan`，将火山本地日额度、opencode 未知刷新额度、单模型健康与 Source 账号故障解耦。

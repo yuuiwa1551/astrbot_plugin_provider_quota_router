@@ -26,12 +26,15 @@ class FakeProvider:
         self.last_kwargs = None
         self.delay = 0.0
         self.response = None
+        self.exception = None
 
     async def text_chat(self, *args, **kwargs):
         self.calls += 1
         self.last_kwargs = kwargs
         if self.delay:
             await asyncio.sleep(self.delay)
+        if self.exception is not None:
+            raise self.exception
         if self.response is not None:
             return self.response
         raise RuntimeError("FreeUsageLimitError: Rate limit exceeded")
@@ -49,6 +52,7 @@ class FakeOwner:
         self.errors = []
         self.timeout = 0.0
         self.attempts = []
+        self.successes = []
 
     async def opencode_quota_guard_cooldown(self, provider):
         return self.cooldown
@@ -64,6 +68,9 @@ class FakeOwner:
 
     async def opencode_quota_guard_attempt(self, provider, route_plan):
         self.attempts.append((provider, route_plan))
+
+    async def opencode_quota_guard_success(self, provider):
+        self.successes.append(provider)
 
 
 class OpenCodeQuotaGuardTests(unittest.IsolatedAsyncioTestCase):
@@ -124,6 +131,30 @@ class OpenCodeQuotaGuardTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(provider.calls, 1)
         self.assertEqual(len(self.owner.errors), 1)
+
+    async def test_provider_timeout_exception_is_not_rewrapped_as_local_budget(
+        self,
+    ) -> None:
+        provider = FakeProvider()
+        provider.exception = TimeoutError("provider socket timed out")
+        self.owner.timeout = 1
+
+        with self.assertRaisesRegex(TimeoutError, "provider socket timed out") as ctx:
+            await provider.text_chat(prompt="test")
+
+        self.assertNotIsInstance(ctx.exception, ProviderAttemptTimeoutError)
+        self.assertIs(self.owner.errors[0][1], ctx.exception)
+
+    async def test_success_is_reported_to_reset_timeout_streak(self) -> None:
+        provider = FakeProvider()
+        provider.response = SimpleNamespace(
+            role="assistant",
+            completion_text="ok",
+        )
+
+        await provider.text_chat(prompt="test")
+
+        self.assertEqual(self.owner.successes, [provider])
 
     async def test_response_is_attributed_and_role_error_is_reported(self) -> None:
         provider = FakeProvider()

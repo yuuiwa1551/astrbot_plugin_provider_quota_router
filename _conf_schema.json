@@ -168,14 +168,32 @@
   "provider_error_request_max_retries": {
     "description": "单模型请求最大尝试次数",
     "type": "int",
-    "hint": "本插件接管的 Agent 请求和 OpenAI-compatible 直连调用中，每个模型最多尝试几次。默认 1，失败后立即冷却并切换后续模型。",
+    "hint": "本插件接管的 Agent 请求和 OpenAI-compatible 直连调用中，每个模型最多尝试几次。默认 1，失败后按错误分类更新状态并切换后续模型。",
     "default": 1
   },
   "provider_error_attempt_timeout_seconds": {
     "description": "单模型首响应超时秒数",
     "type": "int",
-    "hint": "OpenAI-compatible 模型在该时间内没有返回首个响应就立即失败、冷却并切换。默认 20 秒；设为 0 关闭插件超时。",
+    "hint": "OpenAI-compatible 模型在该时间内没有返回首个响应就立即结束当前尝试并切换。默认 20 秒；设为 0 关闭插件超时。单次本地预算耗尽不会直接判定上游故障。",
     "default": 20
+  },
+  "provider_attempt_timeout_failure_threshold": {
+    "description": "本地首响应超时连续阈值",
+    "type": "int",
+    "hint": "同一 Provider 在统计窗口内连续发生多少次本地首响应超时后才开启短冷却。默认 2；任一次成功会清零。",
+    "default": 2
+  },
+  "provider_attempt_timeout_failure_window_seconds": {
+    "description": "本地首响应超时统计窗口秒数",
+    "type": "int",
+    "hint": "连续本地首响应超时必须落在该窗口内才累计。默认 300 秒。",
+    "default": 300
+  },
+  "provider_attempt_timeout_cooldown_seconds": {
+    "description": "连续本地首响应超时短冷却秒数",
+    "type": "int",
+    "hint": "达到连续阈值后只给实际模型开启的短冷却。默认 300 秒；真实 Provider 超时、连接、408/429/5xx 仍使用普通错误冷却。",
+    "default": 300
   },
   "upstream_quota_probe_initial_delay_seconds": {
     "description": "未知重置额度首次探测延迟",

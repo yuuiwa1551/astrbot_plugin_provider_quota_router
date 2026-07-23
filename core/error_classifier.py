@@ -8,6 +8,7 @@ from .provider_errors import is_upstream_free_quota_exhausted_text
 
 
 ERROR_QUOTA = "quota"
+ERROR_LOCAL_ATTEMPT_TIMEOUT = "local_attempt_timeout"
 ERROR_PROVIDER_TRANSIENT = "provider_transient"
 ERROR_PROVIDER_ACCOUNT = "provider_account"
 ERROR_REQUEST = "request"
@@ -106,6 +107,11 @@ _GUARD_STATE_ERROR_NAMES = {
     "ProviderModelCooldownError",
 }
 
+_LOCAL_ATTEMPT_TIMEOUT_MARKERS = (
+    "providerattempttimeouterror",
+    "first response timed out after",
+)
+
 
 def classify_provider_error(
     *,
@@ -123,6 +129,17 @@ def classify_provider_error(
             should_fallback=True,
             cooldown_seconds=None,
             reason="existing_cooldown_guard",
+        )
+
+    if error_name == "ProviderAttemptTimeoutError" or any(
+        marker in normalized for marker in _LOCAL_ATTEMPT_TIMEOUT_MARKERS
+    ):
+        return ErrorDisposition(
+            kind=ERROR_LOCAL_ATTEMPT_TIMEOUT,
+            scope=SCOPE_NONE,
+            should_fallback=True,
+            cooldown_seconds=None,
+            reason="local_attempt_timeout",
         )
 
     if policy.uses_unknown_reset_quota and is_upstream_free_quota_exhausted_text(
@@ -156,7 +173,7 @@ def classify_provider_error(
             reason="request_not_supported",
         )
 
-    if error_name in {"ProviderAttemptTimeoutError", "TimeoutError"} or any(
+    if error_name == "TimeoutError" or any(
         marker in normalized for marker in _TRANSIENT_ERROR_MARKERS
     ):
         return ErrorDisposition(

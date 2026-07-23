@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from core.error_classifier import (
+    ERROR_LOCAL_ATTEMPT_TIMEOUT,
     ERROR_PROVIDER_ACCOUNT,
     ERROR_PROVIDER_TRANSIENT,
     ERROR_QUOTA,
@@ -12,6 +13,7 @@ from core.error_classifier import (
     SCOPE_SOURCE,
     classify_provider_error,
 )
+from core.opencode_quota_guard import ProviderAttemptTimeoutError
 from core.policies import ProviderPolicy
 
 
@@ -51,6 +53,32 @@ class ErrorClassifierTests(unittest.TestCase):
         self.assertEqual(disposition.kind, ERROR_PROVIDER_TRANSIENT)
         self.assertEqual(disposition.scope, SCOPE_MODEL)
         self.assertEqual(disposition.cooldown_seconds, 1800)
+
+    def test_local_attempt_timeout_does_not_immediately_poison_health(self) -> None:
+        disposition = classify_provider_error(
+            error=ProviderAttemptTimeoutError(
+                "provider/model first response timed out after 20 seconds"
+            ),
+            policy=policy(),
+        )
+
+        self.assertEqual(disposition.kind, ERROR_LOCAL_ATTEMPT_TIMEOUT)
+        self.assertEqual(disposition.scope, SCOPE_NONE)
+        self.assertTrue(disposition.should_fallback)
+        self.assertIsNone(disposition.cooldown_seconds)
+
+    def test_serialized_local_attempt_timeout_is_still_distinguished(self) -> None:
+        disposition = classify_provider_error(
+            error=(
+                "All chat models failed: ProviderAttemptTimeoutError: "
+                "provider/model first response timed out after 20 seconds"
+            ),
+            policy=policy(),
+        )
+
+        self.assertEqual(disposition.kind, ERROR_LOCAL_ATTEMPT_TIMEOUT)
+        self.assertEqual(disposition.scope, SCOPE_NONE)
+        self.assertIsNone(disposition.cooldown_seconds)
 
     def test_unknown_error_uses_short_model_cooldown(self) -> None:
         disposition = classify_provider_error(

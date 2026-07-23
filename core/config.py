@@ -63,6 +63,9 @@ class RouterSettings:
     unknown_provider_error_cooldown_seconds: int = 300
     provider_error_request_max_retries: int = 1
     provider_error_attempt_timeout_seconds: int = 20
+    provider_attempt_timeout_failure_threshold: int = 2
+    provider_attempt_timeout_failure_window_seconds: int = 300
+    provider_attempt_timeout_cooldown_seconds: int = 300
     upstream_quota_probe_initial_delay_seconds: int = 3_600
     upstream_quota_probe_interval_seconds: int = 3_600
     upstream_quota_probe_timeout_seconds: int = 20
@@ -152,6 +155,24 @@ class RouterSettings:
             ),
             provider_error_attempt_timeout_seconds=_positive_int(
                 raw.get("provider_error_attempt_timeout_seconds"), 20
+            ),
+            provider_attempt_timeout_failure_threshold=max(
+                1,
+                _positive_int(
+                    raw.get("provider_attempt_timeout_failure_threshold"),
+                    2,
+                ),
+            ),
+            provider_attempt_timeout_failure_window_seconds=max(
+                1,
+                _positive_int(
+                    raw.get("provider_attempt_timeout_failure_window_seconds"),
+                    300,
+                ),
+            ),
+            provider_attempt_timeout_cooldown_seconds=_positive_int(
+                raw.get("provider_attempt_timeout_cooldown_seconds"),
+                300,
             ),
             upstream_quota_probe_initial_delay_seconds=max(
                 60,

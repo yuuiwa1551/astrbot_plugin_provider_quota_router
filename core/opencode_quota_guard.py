@@ -90,7 +90,13 @@ def install_opencode_quota_guard(
             call = state["original_text_chat"](provider, *args, **kwargs)
             response = await _with_attempt_timeout(state, provider, call)
             _mark_response_provider(response, provider)
-            await _report_response_error_if_needed(state, provider, response)
+            is_error = await _report_response_error_if_needed(
+                state,
+                provider,
+                response,
+            )
+            if not is_error:
+                await _report_success(state, provider)
             return response
         except Exception as exc:  # noqa: BLE001
             await _report_error(state, provider, exc)
@@ -116,7 +122,13 @@ def install_opencode_quota_guard(
             except StopAsyncIteration:
                 return
             _mark_response_provider(first, provider)
-            await _report_response_error_if_needed(state, provider, first)
+            is_error = await _report_response_error_if_needed(
+                state,
+                provider,
+                first,
+            )
+            if not is_error:
+                await _report_success(state, provider)
             yield first
             async for item in iterator:
                 _mark_response_provider(item, provider)
@@ -197,16 +209,24 @@ async def _with_attempt_timeout(
     timeout_seconds = _attempt_timeout_seconds(state, provider)
     if timeout_seconds <= 0:
         return await awaitable
+    task = asyncio.ensure_future(awaitable)
     try:
-        return await asyncio.wait_for(awaitable, timeout=timeout_seconds)
-    except TimeoutError as exc:
-        provider_id = str(
-            getattr(provider, "provider_config", {}).get("id") or "provider"
-        )
-        raise ProviderAttemptTimeoutError(
-            f"{provider_id} first response timed out after "
-            f"{timeout_seconds:g} seconds"
-        ) from exc
+        done, _ = await asyncio.wait({task}, timeout=timeout_seconds)
+    except BaseException:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        raise
+    if task in done:
+        return task.result()
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    provider_id = str(
+        getattr(provider, "provider_config", {}).get("id") or "provider"
+    )
+    raise ProviderAttemptTimeoutError(
+        f"{provider_id} first response timed out after "
+        f"{timeout_seconds:g} seconds"
+    )
 
 
 def _attempt_timeout_seconds(state: dict[str, Any], provider: Any) -> float:
@@ -277,13 +297,14 @@ async def _report_response_error_if_needed(
     state: dict[str, Any],
     provider: Any,
     response: Any,
-) -> None:
+) -> bool:
     if str(getattr(response, "role", "") or "").casefold() != "err":
-        return
+        return False
     error_text = str(
         getattr(response, "completion_text", "") or "Provider returned role=err"
     )
     await _report_error(state, provider, RuntimeError(error_text))
+    return True
 
 
 async def _report_error(
@@ -297,6 +318,20 @@ async def _report_error(
             continue
         try:
             await handler(provider, exc)
+        except Exception:  # noqa: BLE001
+            continue
+
+
+async def _report_success(
+    state: dict[str, Any],
+    provider: Any,
+) -> None:
+    for owner in tuple(state["owners"]):
+        handler = getattr(owner, "opencode_quota_guard_success", None)
+        if not callable(handler):
+            continue
+        try:
+            await handler(provider)
         except Exception:  # noqa: BLE001
             continue
 

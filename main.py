@@ -23,7 +23,11 @@ from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.star.filter.command import GreedyStr
 
 from .core.config import ChainConfig, RouterSettings
-from .core.error_classifier import classify_provider_error
+from .core.error_classifier import (
+    ERROR_LOCAL_ATTEMPT_TIMEOUT,
+    classify_provider_error,
+)
+from .core.attempt_timeout_tracker import AttemptTimeoutTracker
 from .core.admin_alerts import build_provider_error_alert, resolve_admin_targets
 from .core.core_fallback_guard import (
     CORE_FALLBACK_APPLIED_EXTRA_KEY,
@@ -76,7 +80,7 @@ from .core.time_window import current_window, window_for_local_date
 
 
 PLUGIN_NAME = "astrbot_plugin_provider_quota_router"
-PLUGIN_VERSION = "0.12.0"
+PLUGIN_VERSION = "0.12.1"
 PLUGIN_REPOSITORY = "https://github.com/yuuiwa1551/astrbot_plugin_provider_quota_router"
 PLUGIN_DESCRIPTION = "按 provider/model 每日 token 额度自动降级路由 AstrBot 聊天模型。"
 HOOK_PRIORITY = 900
@@ -111,6 +115,9 @@ CONFIG_KEYS = {
     "unknown_provider_error_cooldown_seconds",
     "provider_error_request_max_retries",
     "provider_error_attempt_timeout_seconds",
+    "provider_attempt_timeout_failure_threshold",
+    "provider_attempt_timeout_failure_window_seconds",
+    "provider_attempt_timeout_cooldown_seconds",
     "upstream_quota_probe_initial_delay_seconds",
     "upstream_quota_probe_interval_seconds",
     "upstream_quota_probe_timeout_seconds",
@@ -153,6 +160,7 @@ class ProviderQuotaRouterPlugin(Star):
         self._core_fallback_guard_owner = object()
         self._core_fallback_guard_active = False
         self._opencode_quota_guard_active = False
+        self._attempt_timeout_tracker = AttemptTimeoutTracker()
         self.settings = self._load_settings()
         self.data_dir = self._resolve_data_dir()
         self.state = QuotaStateStore(self.data_dir)
@@ -570,6 +578,12 @@ class ProviderQuotaRouterPlugin(Star):
     def opencode_quota_guard_timeout_seconds(self, provider: Any) -> int:
         return self.settings.provider_error_attempt_timeout_seconds
 
+    async def opencode_quota_guard_success(self, provider: Any) -> None:
+        provider_id, _ = self._provider_identity(provider)
+        self._get_attempt_timeout_tracker().record_success(
+            provider_id=provider_id
+        )
+
     async def opencode_quota_guard_error(
         self, provider: Any, exc: Exception
     ) -> None:
@@ -579,7 +593,37 @@ class ProviderQuotaRouterPlugin(Star):
             return
         policy = build_provider_policy(provider=provider, settings=self.settings)
         disposition = classify_provider_error(error=exc, policy=policy)
-        if disposition.reason == "upstream_free_quota_exhausted":
+        if disposition.kind == ERROR_LOCAL_ATTEMPT_TIMEOUT:
+            observation = self._get_attempt_timeout_tracker().record_timeout(
+                provider_id=provider_id,
+                threshold=(
+                    self.settings.provider_attempt_timeout_failure_threshold
+                ),
+                window_seconds=(
+                    self.settings.provider_attempt_timeout_failure_window_seconds
+                ),
+            )
+            if (
+                observation.should_cooldown
+                and self.settings.provider_attempt_timeout_cooldown_seconds
+            ):
+                await self._start_provider_error_cooldown(
+                    provider_id=provider_id,
+                    provider_model=provider_model,
+                    error_text=error_text,
+                    ttl_seconds=(
+                        self.settings.provider_attempt_timeout_cooldown_seconds
+                    ),
+                )
+            else:
+                logger.warning(
+                    "[ProviderQuotaRouter] local first-response timeout: "
+                    "provider=%s count=%d/%d model cooldown deferred",
+                    provider_id,
+                    observation.count,
+                    observation.threshold,
+                )
+        elif disposition.reason == "upstream_free_quota_exhausted":
             await self._start_upstream_quota_cooldown(
                 provider_id=provider_id,
                 provider_model=provider_model,
@@ -598,6 +642,13 @@ class ProviderQuotaRouterPlugin(Star):
                 error_text=error_text,
                 ttl_seconds=disposition.cooldown_seconds,
             )
+
+    def _get_attempt_timeout_tracker(self) -> AttemptTimeoutTracker:
+        tracker = getattr(self, "_attempt_timeout_tracker", None)
+        if not isinstance(tracker, AttemptTimeoutTracker):
+            tracker = AttemptTimeoutTracker()
+            self._attempt_timeout_tracker = tracker
+        return tracker
 
     async def opencode_quota_guard_attempt(
         self,
@@ -1619,6 +1670,9 @@ class ProviderQuotaRouterPlugin(Star):
             "unknown_provider_error_cooldown_seconds": self.settings.unknown_provider_error_cooldown_seconds,
             "provider_error_request_max_retries": self.settings.provider_error_request_max_retries,
             "provider_error_attempt_timeout_seconds": self.settings.provider_error_attempt_timeout_seconds,
+            "provider_attempt_timeout_failure_threshold": self.settings.provider_attempt_timeout_failure_threshold,
+            "provider_attempt_timeout_failure_window_seconds": self.settings.provider_attempt_timeout_failure_window_seconds,
+            "provider_attempt_timeout_cooldown_seconds": self.settings.provider_attempt_timeout_cooldown_seconds,
             "upstream_quota_probe_initial_delay_seconds": self.settings.upstream_quota_probe_initial_delay_seconds,
             "upstream_quota_probe_interval_seconds": self.settings.upstream_quota_probe_interval_seconds,
             "upstream_quota_probe_timeout_seconds": self.settings.upstream_quota_probe_timeout_seconds,

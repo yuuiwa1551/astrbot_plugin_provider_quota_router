@@ -1,7 +1,7 @@
 name: astrbot_plugin_provider_quota_router
 desc: 火山开发者计划本地日额度、opencode 未知刷新额度与全 Provider 故障冷却路由。
 short_desc: Provider 配额与故障路由
-version: 0.12.0
+version: 0.12.1
 author: yuuiwa1551
 repo: "https://github.com/yuuiwa1551/astrbot_plugin_provider_quota_router"
 display_name: Provider 额度路由

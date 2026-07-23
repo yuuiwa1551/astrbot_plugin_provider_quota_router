@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from core.config import RouterSettings
-from core.config import ChainConfig
+from core.config import ChainConfig, RouterSettings
 
 
 class RouterSettingsTests(unittest.TestCase):
@@ -13,6 +12,18 @@ class RouterSettingsTests(unittest.TestCase):
         self.assertTrue(settings.provider_error_cooldown_enabled)
         self.assertEqual(settings.provider_error_cooldown_seconds, 1_800)
         self.assertEqual(settings.provider_error_request_max_retries, 1)
+        self.assertEqual(
+            settings.provider_attempt_timeout_failure_threshold,
+            2,
+        )
+        self.assertEqual(
+            settings.provider_attempt_timeout_failure_window_seconds,
+            300,
+        )
+        self.assertEqual(
+            settings.provider_attempt_timeout_cooldown_seconds,
+            300,
+        )
 
     def test_provider_error_cooldown_can_be_configured(self) -> None:
         settings = RouterSettings.from_raw(
@@ -20,12 +31,27 @@ class RouterSettingsTests(unittest.TestCase):
                 "provider_error_cooldown_enabled": False,
                 "provider_error_cooldown_seconds": 900,
                 "provider_error_request_max_retries": 2,
+                "provider_attempt_timeout_failure_threshold": 3,
+                "provider_attempt_timeout_failure_window_seconds": 600,
+                "provider_attempt_timeout_cooldown_seconds": 120,
             }
         )
 
         self.assertFalse(settings.provider_error_cooldown_enabled)
         self.assertEqual(settings.provider_error_cooldown_seconds, 900)
         self.assertEqual(settings.provider_error_request_max_retries, 2)
+        self.assertEqual(
+            settings.provider_attempt_timeout_failure_threshold,
+            3,
+        )
+        self.assertEqual(
+            settings.provider_attempt_timeout_failure_window_seconds,
+            600,
+        )
+        self.assertEqual(
+            settings.provider_attempt_timeout_cooldown_seconds,
+            120,
+        )
 
     def test_explicit_zero_chain_limit_is_not_replaced_by_default(self) -> None:
         chain = ChainConfig(name="disabled", providers=["provider"], daily_limit_tokens=0)
