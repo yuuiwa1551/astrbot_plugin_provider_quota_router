@@ -391,6 +391,102 @@ class RouterSafetyTests(unittest.IsolatedAsyncioTestCase):
             ["provider-a"],
         )
 
+    async def test_explicit_selection_is_tried_before_global_chain(self) -> None:
+        providers = {
+            "provider-a": make_provider("provider-a", ["text"]),
+            "provider-b": make_provider("provider-b", ["text"]),
+            "provider-c": make_provider("provider-c", ["text"]),
+        }
+        router = ProviderQuotaRouter(
+            settings=RouterSettings(
+                default_safety_buffer_tokens=0,
+                default_request_reservation_tokens=0,
+                strict_priority_order=True,
+                chains=[ChainConfig(name="test", providers=list(providers))],
+            ),
+            ledger=MapLedger({}),
+            state=FakeState(),
+            get_provider=providers.get,
+        )
+
+        decision = await router.decide(
+            current_provider_id="provider-c",
+            window=SimpleNamespace(window_id="test-window"),
+            explicit_provider_selection=True,
+        )
+
+        self.assertEqual(decision.action, "allow")
+        self.assertEqual(decision.selected_provider_id, "provider-c")
+        self.assertEqual(
+            decision.provider_order,
+            ("provider-c", "provider-a", "provider-b"),
+        )
+
+    async def test_failed_explicit_selection_falls_back_to_global_head(self) -> None:
+        providers = {
+            "provider-a": make_provider("provider-a", ["text"]),
+            "provider-b": make_provider("provider-b", ["text"]),
+            "provider-c": make_provider("provider-c", ["text"]),
+        }
+        state = FakeState()
+        state.provider_model_circuits["provider-c"] = {
+            "provider_id": "provider-c",
+            "provider_model": "provider-c",
+            "started_at": time.time(),
+            "retry_at": time.time() + 1_800,
+            "last_error": "HTTP 503",
+        }
+        router = ProviderQuotaRouter(
+            settings=RouterSettings(
+                default_safety_buffer_tokens=0,
+                default_request_reservation_tokens=0,
+                strict_priority_order=True,
+                chains=[ChainConfig(name="test", providers=list(providers))],
+            ),
+            ledger=MapLedger({}),
+            state=state,
+            get_provider=providers.get,
+        )
+
+        decision = await router.decide(
+            current_provider_id="provider-c",
+            window=SimpleNamespace(window_id="test-window"),
+            explicit_provider_selection=True,
+        )
+
+        self.assertEqual(decision.action, "switch")
+        self.assertEqual(decision.selected_provider_id, "provider-a")
+        self.assertEqual(
+            [candidate.provider_id for candidate in decision.candidates],
+            ["provider-c", "provider-a"],
+        )
+
+    async def test_safe_fallback_short_circuits_at_candidate_limit(self) -> None:
+        providers = {
+            "provider-a": make_provider("provider-a", ["text"]),
+            "provider-b": make_provider("provider-b", ["text"]),
+            "provider-c": make_provider("provider-c", ["text"]),
+        }
+        ledger = CapturingLedger()
+        router = ProviderQuotaRouter(
+            settings=RouterSettings(
+                chains=[ChainConfig(name="test", providers=list(providers))],
+            ),
+            ledger=ledger,
+            state=FakeState(),
+            get_provider=providers.get,
+        )
+
+        fallback_ids = await router.eligible_fallback_provider_ids(
+            selected_provider_id="provider-c",
+            provider_order=("provider-c", "provider-a", "provider-b"),
+            window=SimpleNamespace(window_id="test-window"),
+            max_results=1,
+        )
+
+        self.assertEqual(fallback_ids, ["provider-a"])
+        self.assertEqual(len(ledger.calls), 1)
+
     async def test_session_order_can_be_kept_for_compatibility(self) -> None:
         providers = {
             "provider-a": make_provider("provider-a", ["text"]),

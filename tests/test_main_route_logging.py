@@ -25,8 +25,13 @@ class MainRouteLoggingTests(unittest.TestCase):
             "provider/source": "source-model",
             "provider/target": "target-model",
         }.get(provider_id, "")
+        extras = {
+            "provider_quota_router_selection_origin": "umo",
+            "provider_quota_router_planning_elapsed_ms": 12.345,
+        }
         event = SimpleNamespace(
-            unified_msg_origin="aiocqhttp:GroupMessage:123456"
+            unified_msg_origin="aiocqhttp:GroupMessage:123456",
+            get_extra=extras.get,
         )
         decision = RouteDecision(
             action="switch",
@@ -65,6 +70,8 @@ class MainRouteLoggingTests(unittest.TestCase):
             "switch",
             "provider_error_cooldown",
             "upstream_quota",
+            "umo",
+            12.345,
         ))
 
     def test_non_route_decision_does_not_emit_applied_route_log(self) -> None:

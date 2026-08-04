@@ -12,6 +12,7 @@ class RouterSettingsTests(unittest.TestCase):
         self.assertTrue(settings.provider_error_cooldown_enabled)
         self.assertEqual(settings.provider_error_cooldown_seconds, 1_800)
         self.assertEqual(settings.provider_error_request_max_retries, 1)
+        self.assertEqual(settings.provider_error_fallback_max_candidates, 1)
         self.assertEqual(
             settings.provider_attempt_timeout_failure_threshold,
             2,
@@ -31,6 +32,7 @@ class RouterSettingsTests(unittest.TestCase):
                 "provider_error_cooldown_enabled": False,
                 "provider_error_cooldown_seconds": 900,
                 "provider_error_request_max_retries": 2,
+                "provider_error_fallback_max_candidates": 0,
                 "provider_attempt_timeout_failure_threshold": 3,
                 "provider_attempt_timeout_failure_window_seconds": 600,
                 "provider_attempt_timeout_cooldown_seconds": 120,
@@ -40,6 +42,7 @@ class RouterSettingsTests(unittest.TestCase):
         self.assertFalse(settings.provider_error_cooldown_enabled)
         self.assertEqual(settings.provider_error_cooldown_seconds, 900)
         self.assertEqual(settings.provider_error_request_max_retries, 2)
+        self.assertEqual(settings.provider_error_fallback_max_candidates, 0)
         self.assertEqual(
             settings.provider_attempt_timeout_failure_threshold,
             3,

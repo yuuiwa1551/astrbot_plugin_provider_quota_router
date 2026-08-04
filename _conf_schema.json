@@ -90,7 +90,7 @@
   "strict_priority_order": {
     "description": "严格按链首优先",
     "type": "bool",
-    "hint": "每次都从 fallback 列表第一项开始检查额度与模态，不沿用会话当前模型作为扫描起点。",
+    "hint": "普通会话每次从 fallback 列表第一项检查；请求或会话明确指定 Provider 时先尊重指定模型，失败后再回到全局顺序。",
     "default": true
   },
   "disable_astrbot_error_fallback": {
@@ -169,6 +169,12 @@
     "description": "单模型请求最大尝试次数",
     "type": "int",
     "hint": "本插件接管的 Agent 请求和 OpenAI-compatible 直连调用中，每个模型最多尝试几次。默认 1，失败后按错误分类更新状态并切换后续模型。",
+    "default": 1
+  },
+  "provider_error_fallback_max_candidates": {
+    "description": "单次请求最多备用模型数",
+    "type": "int",
+    "hint": "主模型失败后，当前消息最多继续尝试多少个安全 fallback Provider。默认 1，设为 0 可禁止当前消息继续逐层尝试；后续消息仍会跳过已冷却模型。",
     "default": 1
   },
   "provider_error_attempt_timeout_seconds": {

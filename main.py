@@ -15,6 +15,7 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star, register
+from astrbot.core import sp
 try:
     from astrbot.api.star import StarTools
 except ImportError:  # pragma: no cover
@@ -52,6 +53,7 @@ from .core.provider_errors import (
     is_provider_error_text,
     response_error_text,
 )
+from .core.provider_selection import ProviderSelection
 from .core.opencode_quota_guard import (
     begin_provider_guard_bypass,
     bind_provider_guard_route_plan,
@@ -81,10 +83,11 @@ from .core.time_window import current_window, window_for_local_date
 
 
 PLUGIN_NAME = "astrbot_plugin_provider_quota_router"
-PLUGIN_VERSION = "0.12.2"
+PLUGIN_VERSION = "0.13.0"
 PLUGIN_REPOSITORY = "https://github.com/yuuiwa1551/astrbot_plugin_provider_quota_router"
 PLUGIN_DESCRIPTION = "按 provider/model 每日 token 额度自动降级路由 AstrBot 聊天模型。"
 HOOK_PRIORITY = 900
+SESSION_PROVIDER_PREFERENCE_KEY = "provider_perf_chat_completion"
 
 CONFIG_KEYS = {
     "enabled",
@@ -115,6 +118,7 @@ CONFIG_KEYS = {
     "provider_error_cooldown_seconds",
     "unknown_provider_error_cooldown_seconds",
     "provider_error_request_max_retries",
+    "provider_error_fallback_max_candidates",
     "provider_error_attempt_timeout_seconds",
     "provider_attempt_timeout_failure_threshold",
     "provider_attempt_timeout_failure_window_seconds",
@@ -455,8 +459,9 @@ class ProviderQuotaRouterPlugin(Star):
             else:
                 logger.info(
                     "[ProviderQuotaRouter] AstrBot safe error fallback guard enabled: "
-                    "request_max_retries=%s",
+                    "request_max_retries=%s fallback_max_candidates=%s",
                     self.settings.provider_error_request_max_retries,
+                    self.settings.provider_error_fallback_max_candidates,
                 )
         elif not should_enable:
             self._disable_core_fallback_guard()
@@ -979,10 +984,12 @@ class ProviderQuotaRouterPlugin(Star):
     async def on_waiting_llm_request(self, event: AstrMessageEvent) -> None:
         if not self.settings.enabled:
             return
+        planning_started = time.perf_counter()
         await self._refresh_fallback_config_if_changed()
         router = self.router
         settings = router.settings
-        current_provider_id = self._current_provider_id(event)
+        selection = await self._provider_selection(event)
+        current_provider_id = selection.provider_id
         if not current_provider_id:
             return
         window = current_window(
@@ -996,6 +1003,7 @@ class ProviderQuotaRouterPlugin(Star):
             current_provider_id=current_provider_id,
             window=window,
             required_modalities=required_modalities,
+            explicit_provider_selection=selection.is_explicit,
         )
         safe_fallback_ids: list[str] = []
         safe_fallback_providers: list[Any] = []
@@ -1009,6 +1017,10 @@ class ProviderQuotaRouterPlugin(Star):
                         selected_provider_id=selected_provider_id,
                         window=window,
                         required_modalities=required_modalities,
+                        provider_order=decision.provider_order,
+                        max_results=(
+                            settings.provider_error_fallback_max_candidates
+                        ),
                     )
                 )
                 safe_fallback_providers = [
@@ -1030,6 +1042,12 @@ class ProviderQuotaRouterPlugin(Star):
             if self._core_fallback_guard_active and not settings.dry_run
             else None
         )
+        planning_elapsed_ms = round(
+            (time.perf_counter() - planning_started) * 1000,
+            3,
+        )
+        payload["selection_origin"] = selection.origin
+        payload["planning_elapsed_ms"] = planning_elapsed_ms
         await self.state.record_decision(payload)
 
         route_plan = RoutePlan(
@@ -1040,6 +1058,8 @@ class ProviderQuotaRouterPlugin(Star):
             required_modalities=frozenset(required_modalities),
             decision=decision,
             safe_fallback_provider_ids=tuple(safe_fallback_ids),
+            selection_origin=selection.origin,
+            planning_elapsed_ms=planning_elapsed_ms,
         )
 
         if decision.action == "skip":
@@ -1063,6 +1083,14 @@ class ProviderQuotaRouterPlugin(Star):
         event.set_extra("provider_quota_router_request_id", request_id)
         event.set_extra("provider_quota_router_decision", decision.action)
         event.set_extra("provider_quota_router_reason", decision.reason)
+        event.set_extra(
+            "provider_quota_router_selection_origin",
+            selection.origin,
+        )
+        event.set_extra(
+            "provider_quota_router_planning_elapsed_ms",
+            planning_elapsed_ms,
+        )
         event.set_extra(
             "provider_quota_router_selected_provider_id",
             str(decision.selected_provider_id or current_provider_id),
@@ -1118,11 +1146,22 @@ class ProviderQuotaRouterPlugin(Star):
             if source_state is not None
             else str(decision.reason)
         )
+        extra_getter = getattr(event, "get_extra", None)
+        selection_origin = (
+            str(extra_getter("provider_quota_router_selection_origin") or "default")
+            if callable(extra_getter)
+            else "default"
+        )
+        planning_elapsed_ms = (
+            float(extra_getter("provider_quota_router_planning_elapsed_ms") or 0)
+            if callable(extra_getter)
+            else 0.0
+        )
         logger.info(
             "[ProviderQuotaRouter] 本次对话已由插件路由: "
             "conversation=%s from_provider=%s from_model=%s "
             "to_provider=%s to_model=%s action=%s "
-            "trigger=%s target_status=%s",
+            "trigger=%s target_status=%s selection_origin=%s planning_ms=%.1f",
             event.unified_msg_origin,
             source_provider_id,
             source_model,
@@ -1131,6 +1170,8 @@ class ProviderQuotaRouterPlugin(Star):
             decision.action,
             trigger,
             decision.reason,
+            selection_origin,
+            planning_elapsed_ms,
         )
         return True
 
@@ -1720,6 +1761,7 @@ class ProviderQuotaRouterPlugin(Star):
             "provider_error_cooldown_seconds": self.settings.provider_error_cooldown_seconds,
             "unknown_provider_error_cooldown_seconds": self.settings.unknown_provider_error_cooldown_seconds,
             "provider_error_request_max_retries": self.settings.provider_error_request_max_retries,
+            "provider_error_fallback_max_candidates": self.settings.provider_error_fallback_max_candidates,
             "provider_error_attempt_timeout_seconds": self.settings.provider_error_attempt_timeout_seconds,
             "provider_attempt_timeout_failure_threshold": self.settings.provider_attempt_timeout_failure_threshold,
             "provider_attempt_timeout_failure_window_seconds": self.settings.provider_attempt_timeout_failure_window_seconds,
@@ -1793,6 +1835,42 @@ class ProviderQuotaRouterPlugin(Star):
         if (end_date - start_date).days > 89:
             start_date = end_date - timedelta(days=89)
         return start_date, end_date
+
+    async def _provider_selection(
+        self,
+        event: AstrMessageEvent,
+    ) -> ProviderSelection:
+        selected = event.get_extra("selected_provider")
+        if isinstance(selected, str) and selected:
+            return ProviderSelection(provider_id=selected, origin="request")
+
+        preferred_id = ""
+        try:
+            preference = await sp.session_get(
+                event.unified_msg_origin,
+                SESSION_PROVIDER_PREFERENCE_KEY,
+                None,
+            )
+            if isinstance(preference, str):
+                preferred_id = preference
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "[ProviderQuotaRouter] failed to read UMO provider preference: %s",
+                exc,
+            )
+        if preferred_id:
+            preferred_provider = self.context.get_provider_by_id(preferred_id)
+            if preferred_provider is not None:
+                return ProviderSelection(provider_id=preferred_id, origin="umo")
+            logger.debug(
+                "[ProviderQuotaRouter] ignored unavailable UMO provider preference: %s",
+                preferred_id,
+            )
+
+        return ProviderSelection(
+            provider_id=self._current_provider_id(event),
+            origin="default",
+        )
 
     def _current_provider_id(self, event: AstrMessageEvent) -> str:
         selected = event.get_extra("selected_provider")

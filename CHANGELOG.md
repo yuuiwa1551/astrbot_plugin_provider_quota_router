@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.13.0
+
+- 区分请求级 `selected_provider`、UMO `provider_perf_chat_completion` 和普通默认 Provider；明确选择先于严格全局优先级。
+- 显式 Provider 不可用时按原全局优先级检查其余 Provider，即使指定模型位于链尾也保留安全 fallback。
+- RouteDecision 与请求级 RoutePlan 固化本次 Provider 顺序、选择来源和规划耗时，热重载不会改变进行中的请求。
+- 新增 `provider_error_fallback_max_candidates`，与单 Provider 内部重试次数分离；默认一条消息最多再尝试一个安全 fallback，并按需短路扫描。
+- 平台路由日志增加选择来源和规划耗时，决策记录增加完整候选顺序与规划耗时。
+- 版本统一为 0.13.0。
+
 ## v0.12.2
 
 - 当 quota router 实际执行 `switch/use_last` 且目标 Provider 不同时，在平台 INFO 日志输出统一的“本次对话已由插件路由”记录。

@@ -259,3 +259,17 @@ deepseek/deepseek-v4-pro
 - 日志包含 conversation origin、原 Provider/模型、目标 Provider/模型、动作、原模型跳过原因和目标状态。
 - 普通放行请求不刷路由日志，dry-run 使用不同文案。
 - 使用容器单元测试与实时路由触发验证平台日志。
+
+## 17期 显式模型优先与路由快路径
+
+目标：保留普通会话从全局链首恢复优先级的能力，同时让请求级和 UMO 会话级明确选择真正优先；为运行中 fallback 设置独立候选数量上限，阻止故障时逐层等待整条模型链。
+
+状态：v0.13.0 已完成并部署到实时 AstrBot；容器内 98 项测试通过，认证状态 API、实时 UMO 候选顺序、DeepSeek V4 Flash Provider 直测和 1.36 秒 WebChat 端到端请求均已验证，详见 `17期plan.md`。
+
+计划交付：
+
+- 区分请求显式选择、UMO 显式偏好和普通默认 Provider。
+- 显式 Provider 先尝试；失败后按原全局优先级使用其他安全候选。
+- 未显式选择时继续遵循 `strict_priority_order`，不重新引入会话粘滞。
+- RoutePlan 固化本次候选顺序、选择来源和规划耗时。
+- 新增 `provider_error_fallback_max_candidates`，默认一条消息最多注入并尝试一个安全备用 Provider。

@@ -10,8 +10,8 @@ AstrBot provider/model 日额度路由插件。它按配置的每日 token 额�
 - 默认按 `provider_model` 作为 quota key，也支持按 `provider_id`。
 - 默认使用 AstrBot 的 `default_provider_id + fallback_chat_models` 作为路由链。
 - 默认 fallback 链直接读取 `data/cmd_config.json`；每次 LLM 请求前检查文件签名并即时热更新，另有每 5 分钟一次的后台兜底，无需重启插件。
-- 默认每次从 fallback 链首严格按顺序检查额度和请求模态，不沿用会话停留的旧 provider 作为扫描起点。
-- quota router 实际切换到不同 Provider 时，平台 INFO 日志会显示会话 origin、原 Provider/模型、目标 Provider/模型、动作、原模型跳过原因和目标状态；普通未切换请求不刷日志。
+- 普通会话默认每次从 fallback 链首严格检查；请求 `selected_provider` 或 UMO 会话偏好明确指定 Provider 时，先使用指定模型，失败后再按全局顺序 fallback。
+- quota router 实际切换到不同 Provider 时，平台 INFO 日志会显示会话 origin、原 Provider/模型、目标 Provider/模型、动作、原模型跳过原因、目标状态、选择来源和规划耗时；普通未切换请求不刷日志。
 - 可按请求禁用 AstrBot 核心的错误 fallback，避免 403、超时等错误绕过额度判断进入后续付费模型。
 - 在 provider 选择前通过 `selected_provider` 切换到第一个可用 provider。
 - 使用 pending reservation 和短期 overlay 降低并发请求导致的超额风险。
@@ -21,7 +21,7 @@ AstrBot provider/model 日额度路由插件。它按配置的每日 token 额�
 - 默认把 `opencode-zen/` 从火山 token 安全阈值中排除；具体模型返回 `FreeUsageLimitError` 后，只冷却该模型，用户请求期间零外呼，后台探测成功后恢复，其他 opencode 模型继续可选。
 - opencode 额度保护同时覆盖 Agent 请求与图片描述等直接 Provider 调用；冷却期间直接调用会在发出网络请求前被拦截。
 - Provider/SDK 自己报告的超时、连接失败、普通 429、5xx 等明确故障默认只冷却实际失败模型 30 分钟；插件自己的单次 20 秒首响应预算耗尽只 fallback，5 分钟内连续两次才短冷却 5 分钟。未知边界异常也短冷却 5 分钟。上下文、模态、工具、附件、内容审核和 400/422 请求错误不污染模型健康状态。
-- Agent 当前模型失败后使用插件过滤过的安全 fallback 继续向下切换；每个模型默认只尝试 1 次，不在明确失败的模型上重复等待。
+- Agent 当前模型失败后使用插件过滤过的安全 fallback；候选按本次请求顺序和独立数量上限按需计算，默认一条消息最多再试一个安全模型。
 - 火山开发者计划明确返回 `AccountOverdueError` 等账号级故障后，整组火山模型熔断 30 分钟；普通请求级 403 不连坐。到期由后台从同 Source 的 token 安全文本模型中探测，成功才恢复整组。
 - 每条请求保存不可变 RoutePlan；fallback 热重载只影响下一条请求，当前请求始终使用同一份链、策略和安全候选。
 - 本插件接管的任意模型最终返回 Provider 错误时，默认不在原会话展示技术错误，改为私聊 Bot 管理员；全部错误共用持久化的一小时告警窗口。
@@ -47,7 +47,7 @@ AstrBot provider/model 日额度路由插件。它按配置的每日 token 额�
 | `dry_run` | `false` | 只记录决策，不实际切换 |
 | `use_astrbot_fallback_chain` | `true` | 未配置自定义链时使用 AstrBot fallback 链 |
 | `fallback_watch_interval_seconds` | `300` | 无请求时检查 `cmd_config.json` 的兜底间隔；请求前会即时检查文件签名 |
-| `strict_priority_order` | `true` | 每次从链首严格按顺序检查候选 |
+| `strict_priority_order` | `true` | 普通会话从链首检查；请求/UMO 明确选择优先 |
 | `disable_astrbot_error_fallback` | `true` | 兼容配置键；开启后由插件接管并过滤 AstrBot 当前请求的错误 fallback |
 | `quota_cooldown_seconds` | `86400` | 受控模型达到阈值后的冷却时间 |
 | `unlimited_provider_prefixes` | `["deepseek/"]` | 兼容配置；所有非火山 Provider 均不参与本地 token 限制 |
@@ -61,6 +61,7 @@ AstrBot provider/model 日额度路由插件。它按配置的每日 token 额�
 | `provider_error_cooldown_seconds` | `1800` | 已知超时、连接、429、5xx 故障冷却时间 |
 | `unknown_provider_error_cooldown_seconds` | `300` | 未识别 Provider 边界异常的短冷却时间 |
 | `provider_error_request_max_retries` | `1` | 每个受管模型在当前调用中的最大尝试次数；失败后立即切换 |
+| `provider_error_fallback_max_candidates` | `1` | 当前消息最多继续尝试的安全备用 Provider 数；`0` 表示不继续逐层尝试 |
 | `provider_error_attempt_timeout_seconds` | `20` | OpenAI-compatible 模型首响应墙钟预算；耗尽后结束当前尝试并 fallback，`0` 表示关闭 |
 | `provider_attempt_timeout_failure_threshold` | `2` | 统计窗口内连续多少次本地首响应超时才开启短冷却；成功会清零 |
 | `provider_attempt_timeout_failure_window_seconds` | `300` | 本地首响应超时连续计数窗口 |
@@ -167,9 +168,9 @@ AstrBot 的 LLM 流程里，`on_waiting_llm_request` 在 main agent 构建和 pr
 
 默认 fallback 链在每次 LLM 请求前对 `data/cmd_config.json` 做一次轻量 `stat`；只有签名变化时才使用 `utf-8-sig` 读取 JSON 并原子替换 router，因此修改列表后的下一条消息即可看到新链。同时保留低频后台任务，默认每 300 秒在无请求时兜底检查一次。文件有其他配置变化但 fallback 内容相同时，不重建 router。
 
-`strict_priority_order=true` 时，无论某个会话此前停在哪个 provider，每次请求都会重新从链首检查；只有前面的 provider 超过额度、缺失或不支持当前图片/音频模态时，才会检查下一项。
+`strict_priority_order=true` 时，普通会话不会沿用上次 fallback 停留位置，而是重新从链首检查。请求携带 `selected_provider`，或 AstrBot 在 UMO 范围保存了 `provider_perf_chat_completion` 时，插件会把该明确选择放到本次候选顺序第一位；它不可用时再按原全局链首到链尾检查其余 Provider。这样既不会让错误 fallback 永久粘住会话，也不会覆盖群聊或请求明确指定的模型。
 
-AstrBot 自己还会在 provider 返回 403、超时或错误响应时执行一套运行中 fallback。`disable_astrbot_error_fallback=true` 是早期版本保留的兼容键；现在它不会清空后续候选，而是让插件从实时链中取出当前模型之后的 Provider，按额度、冷却、火山熔断和请求模态过滤后注入 runner。`provider_error_request_max_retries=1` 会把受管 Agent 请求以及 OpenAI-compatible 直连调用的单模型尝试次数收紧为一次，异常抛出后按错误分类更新状态并让 runner 继续下一个安全候选；本地首响应预算首次耗尽只影响当前请求。
+AstrBot 自己还会在 provider 返回 403、超时或错误响应时执行一套运行中 fallback。`disable_astrbot_error_fallback=true` 是早期版本保留的兼容键；现在它不会清空后续候选，而是按本请求 RoutePlan 的顺序、额度、冷却、火山熔断和请求模态过滤后注入 runner。`provider_error_request_max_retries=1` 只限制每个 Provider 自己的调用尝试；独立的 `provider_error_fallback_max_candidates=1` 才负责把当前消息的备用 Provider 数量封顶为一个。候选按需扫描，异常抛出后按错误分类更新状态并切换，本地首响应预算首次耗尽只影响当前请求。
 
 该安全 fallback 保护默认开启。当前置 provider 故障时，AstrBot 仍会继续尝试后续 provider，但候选固定来自本请求 RoutePlan，并已按额度、冷却、Source 状态和请求模态过滤。
 
@@ -191,6 +192,13 @@ AstrBot 的最终 `role=err` 响应不会经过普通的 Agent done hook，因�
 - Future：火山引擎官方用量 API 对账、按 API key/account 分组额度、与 provider 负载均衡插件集成。
 
 ## 更新历史
+
+### v0.13.0
+
+- 请求级 `selected_provider` 和 UMO 会话 Provider 偏好成为本次路由首选，不再被严格全局优先级无条件覆盖。
+- 显式模型不可用时回到原全局链的其余安全候选；普通会话继续从链首恢复优先级。
+- RoutePlan 固化候选顺序、选择来源和规划耗时；新增独立 fallback 数量上限，默认一条消息只再尝试一个候选。
+- 路由平台日志增加 `selection_origin` 与 `planning_ms`，决策记录增加 `provider_order`、`selection_origin` 和 `planning_elapsed_ms`。
 
 ### v0.12.2
 

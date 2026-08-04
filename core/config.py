@@ -62,6 +62,7 @@ class RouterSettings:
     provider_error_cooldown_seconds: int = 1_800
     unknown_provider_error_cooldown_seconds: int = 300
     provider_error_request_max_retries: int = 1
+    provider_error_fallback_max_candidates: int = 1
     provider_error_attempt_timeout_seconds: int = 20
     provider_attempt_timeout_failure_threshold: int = 2
     provider_attempt_timeout_failure_window_seconds: int = 300
@@ -152,6 +153,10 @@ class RouterSettings:
                 _positive_int(
                     raw.get("provider_error_request_max_retries"), 1
                 ),
+            ),
+            provider_error_fallback_max_candidates=_positive_int(
+                raw.get("provider_error_fallback_max_candidates"),
+                1,
             ),
             provider_error_attempt_timeout_seconds=_positive_int(
                 raw.get("provider_error_attempt_timeout_seconds"), 20
