@@ -83,7 +83,7 @@ from .core.time_window import current_window, window_for_local_date
 
 
 PLUGIN_NAME = "astrbot_plugin_provider_quota_router"
-PLUGIN_VERSION = "0.13.0"
+PLUGIN_VERSION = "0.14.0"
 PLUGIN_REPOSITORY = "https://github.com/yuuiwa1551/astrbot_plugin_provider_quota_router"
 PLUGIN_DESCRIPTION = "按 provider/model 每日 token 额度自动降级路由 AstrBot 聊天模型。"
 HOOK_PRIORITY = 900
@@ -120,6 +120,8 @@ CONFIG_KEYS = {
     "provider_error_request_max_retries",
     "provider_error_fallback_max_candidates",
     "provider_error_attempt_timeout_seconds",
+    "provider_policy_overrides",
+    "provider_policy_overrides_json",
     "provider_attempt_timeout_failure_threshold",
     "provider_attempt_timeout_failure_window_seconds",
     "provider_attempt_timeout_cooldown_seconds",
@@ -176,9 +178,12 @@ class ProviderQuotaRouterPlugin(Star):
         self.router = self._build_router()
         self._register_web_apis()
         logger.info(
-            "[ProviderQuotaRouter] loaded: enabled=%s chains=%d quota_key_mode=%s dry_run=%s fallback_source=%s",
+            "[ProviderQuotaRouter] loaded: enabled=%s chains=%d "
+            "provider_policy_overrides=%d quota_key_mode=%s dry_run=%s "
+            "fallback_source=%s",
             self.settings.enabled,
             len(self.settings.chains),
+            len(self.settings.provider_policy_overrides),
             self.settings.quota_key_mode,
             self.settings.dry_run,
             self._fallback_chain_source,
@@ -579,10 +584,19 @@ class ProviderQuotaRouterPlugin(Star):
         return cooldown
 
     def opencode_quota_guard_request_max_retries(self, provider: Any) -> int:
-        return self.settings.provider_error_request_max_retries
+        policy = build_provider_policy(provider=provider, settings=self.settings)
+        return policy.request_max_retries
 
     def opencode_quota_guard_timeout_seconds(self, provider: Any) -> int:
-        return self.settings.provider_error_attempt_timeout_seconds
+        policy = build_provider_policy(provider=provider, settings=self.settings)
+        return policy.first_response_timeout_seconds
+
+    def opencode_quota_guard_max_output_tokens(
+        self,
+        provider: Any,
+    ) -> int | None:
+        policy = build_provider_policy(provider=provider, settings=self.settings)
+        return policy.max_output_tokens
 
     async def opencode_quota_guard_success(self, provider: Any) -> None:
         provider_id, _ = self._provider_identity(provider)
@@ -1763,6 +1777,17 @@ class ProviderQuotaRouterPlugin(Star):
             "provider_error_request_max_retries": self.settings.provider_error_request_max_retries,
             "provider_error_fallback_max_candidates": self.settings.provider_error_fallback_max_candidates,
             "provider_error_attempt_timeout_seconds": self.settings.provider_error_attempt_timeout_seconds,
+            "provider_policy_overrides": [
+                {
+                    "provider_id": override.provider_id,
+                    "first_response_timeout_seconds": (
+                        override.first_response_timeout_seconds
+                    ),
+                    "request_max_retries": override.request_max_retries,
+                    "max_output_tokens": override.max_output_tokens,
+                }
+                for override in self.settings.provider_policy_overrides
+            ],
             "provider_attempt_timeout_failure_threshold": self.settings.provider_attempt_timeout_failure_threshold,
             "provider_attempt_timeout_failure_window_seconds": self.settings.provider_attempt_timeout_failure_window_seconds,
             "provider_attempt_timeout_cooldown_seconds": self.settings.provider_attempt_timeout_cooldown_seconds,

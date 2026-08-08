@@ -33,6 +33,14 @@ class ChainConfig:
 
 
 @dataclass(frozen=True)
+class ProviderPolicyOverride:
+    provider_id: str
+    first_response_timeout_seconds: int | None = None
+    request_max_retries: int | None = None
+    max_output_tokens: int | None = None
+
+
+@dataclass(frozen=True)
 class RouterSettings:
     enabled: bool = True
     timezone: str = "Asia/Shanghai"
@@ -64,6 +72,7 @@ class RouterSettings:
     provider_error_request_max_retries: int = 1
     provider_error_fallback_max_candidates: int = 1
     provider_error_attempt_timeout_seconds: int = 20
+    provider_policy_overrides: tuple[ProviderPolicyOverride, ...] = ()
     provider_attempt_timeout_failure_threshold: int = 2
     provider_attempt_timeout_failure_window_seconds: int = 300
     provider_attempt_timeout_cooldown_seconds: int = 300
@@ -84,6 +93,10 @@ class RouterSettings:
     def from_raw(cls, raw: dict[str, Any] | None) -> "RouterSettings":
         raw = dict(raw or {})
         chains = _load_chains(raw.get("chains"), raw.get("chains_json"))
+        provider_policy_overrides = _load_provider_policy_overrides(
+            raw.get("provider_policy_overrides"),
+            raw.get("provider_policy_overrides_json"),
+        )
         exhausted_action = str(raw.get("exhausted_action", "stop") or "stop")
         if exhausted_action not in EXHAUSTED_ACTIONS:
             exhausted_action = "stop"
@@ -161,6 +174,7 @@ class RouterSettings:
             provider_error_attempt_timeout_seconds=_positive_int(
                 raw.get("provider_error_attempt_timeout_seconds"), 20
             ),
+            provider_policy_overrides=provider_policy_overrides,
             provider_attempt_timeout_failure_threshold=max(
                 1,
                 _positive_int(
@@ -216,6 +230,20 @@ class RouterSettings:
             admin_user_ids={str(item).strip() for item in raw.get("admin_user_ids", []) if str(item).strip()},
             exhausted_message=str(raw.get("exhausted_message") or cls.exhausted_message),
             chains=chains,
+        )
+
+    def provider_policy_override(
+        self,
+        provider_id: str,
+    ) -> ProviderPolicyOverride | None:
+        normalized = str(provider_id or "").casefold()
+        return next(
+            (
+                override
+                for override in self.provider_policy_overrides
+                if override.provider_id.casefold() == normalized
+            ),
+            None,
         )
 
     def is_unlimited_provider(self, provider_id: str) -> bool:
@@ -288,6 +316,62 @@ def _load_chains(raw_chains: Any, raw_json: Any) -> list[ChainConfig]:
             )
         )
     return chains
+
+
+def _load_provider_policy_overrides(
+    raw_overrides: Any,
+    raw_json: Any,
+) -> tuple[ProviderPolicyOverride, ...]:
+    data: Any = raw_overrides
+    if raw_json:
+        try:
+            data = json.loads(str(raw_json))
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"provider_policy_overrides_json is not valid JSON: {exc}"
+            ) from exc
+    if not data:
+        return ()
+    if isinstance(data, dict):
+        data = [
+            {**values, "provider_id": provider_id}
+            for provider_id, values in data.items()
+            if isinstance(values, dict)
+        ]
+    if not isinstance(data, list):
+        raise ValueError("provider policy overrides must be a list or object")
+
+    overrides: dict[str, ProviderPolicyOverride] = {}
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        provider_id = str(item.get("provider_id") or "").strip()
+        if not provider_id:
+            continue
+        timeout_seconds = _optional_int(
+            item.get("first_response_timeout_seconds")
+        )
+        request_max_retries = _optional_int(item.get("request_max_retries"))
+        max_output_tokens = _optional_int(item.get("max_output_tokens"))
+        overrides[provider_id.casefold()] = ProviderPolicyOverride(
+            provider_id=provider_id,
+            first_response_timeout_seconds=(
+                max(0, timeout_seconds)
+                if timeout_seconds is not None
+                else None
+            ),
+            request_max_retries=(
+                max(1, request_max_retries)
+                if request_max_retries is not None
+                else None
+            ),
+            max_output_tokens=(
+                max(0, max_output_tokens)
+                if max_output_tokens is not None
+                else None
+            ),
+        )
+    return tuple(overrides.values())
 
 
 def _optional_int(value: Any) -> int | None:

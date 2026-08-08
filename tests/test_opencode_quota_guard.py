@@ -41,6 +41,7 @@ class FakeProvider:
 
     async def text_chat_stream(self, *args, **kwargs):
         self.calls += 1
+        self.last_kwargs = kwargs
         if self.delay:
             await asyncio.sleep(self.delay)
         yield "chunk"
@@ -51,6 +52,8 @@ class FakeOwner:
         self.cooldown = None
         self.errors = []
         self.timeout = 0.0
+        self.request_max_retries = 1
+        self.max_output_tokens = None
         self.attempts = []
         self.successes = []
 
@@ -61,10 +64,13 @@ class FakeOwner:
         self.errors.append((provider, exc))
 
     def opencode_quota_guard_request_max_retries(self, provider):
-        return 1
+        return self.request_max_retries
 
     def opencode_quota_guard_timeout_seconds(self, provider):
         return self.timeout
+
+    def opencode_quota_guard_max_output_tokens(self, provider):
+        return self.max_output_tokens
 
     async def opencode_quota_guard_attempt(self, provider, route_plan):
         self.attempts.append((provider, route_plan))
@@ -155,6 +161,57 @@ class OpenCodeQuotaGuardTests(unittest.IsolatedAsyncioTestCase):
         await provider.text_chat(prompt="test")
 
         self.assertEqual(self.owner.successes, [provider])
+
+    async def test_provider_budget_injects_output_token_cap(self) -> None:
+        provider = FakeProvider()
+        provider.response = SimpleNamespace(
+            role="assistant",
+            completion_text="ok",
+        )
+        self.owner.request_max_retries = 2
+        self.owner.max_output_tokens = 220
+
+        await provider.text_chat(prompt="test")
+
+        self.assertEqual(provider.last_kwargs["request_max_retries"], 2)
+        self.assertEqual(provider.last_kwargs["max_tokens"], 220)
+
+    async def test_provider_budget_preserves_smaller_requested_output(self) -> None:
+        provider = FakeProvider()
+        provider.response = SimpleNamespace(
+            role="assistant",
+            completion_text="ok",
+        )
+        self.owner.max_output_tokens = 220
+
+        await provider.text_chat(prompt="test", max_tokens=15)
+
+        self.assertEqual(provider.last_kwargs["max_tokens"], 15)
+
+    async def test_provider_budget_caps_max_completion_tokens(self) -> None:
+        provider = FakeProvider()
+        provider.response = SimpleNamespace(
+            role="assistant",
+            completion_text="ok",
+        )
+        self.owner.max_output_tokens = 220
+
+        await provider.text_chat(prompt="test", max_completion_tokens=500)
+
+        self.assertEqual(provider.last_kwargs["max_completion_tokens"], 220)
+        self.assertNotIn("max_tokens", provider.last_kwargs)
+
+    async def test_stream_call_receives_provider_output_cap(self) -> None:
+        provider = FakeProvider()
+        self.owner.max_output_tokens = 220
+
+        chunks = [
+            chunk
+            async for chunk in provider.text_chat_stream(prompt="test")
+        ]
+
+        self.assertEqual(chunks, ["chunk"])
+        self.assertEqual(provider.last_kwargs["max_tokens"], 220)
 
     async def test_response_is_attributed_and_role_error_is_reported(self) -> None:
         provider = FakeProvider()

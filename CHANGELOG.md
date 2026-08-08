@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.14.0
+
+- 新增 `provider_policy_overrides_json`，可按完整 Provider ID 单独覆盖首响应预算、单 Provider 请求次数和最大输出 Token，不改变未命中 Provider 的全局策略。
+- Provider 专属策略进入不可变 `ProviderPolicy`，OpenAI-compatible 普通与流式直连调用统一执行；图片分类、后台好感度等绕过 Agent 路由钩子的调用也受保护。
+- `max_output_tokens` 只收紧上限：调用方未指定时注入上限，指定更大值时截断，指定更小值时保持原值。
+- 本机部署策略将 `volcengine-agent-plan/doubao-seed-2.0-mini` 作为辅助专用 Provider，设置为 3 秒首响应、1 次请求、220 Token；其他主模型继续使用全局 20 秒预算。
+- 版本统一为 0.14.0。
+
 ## v0.13.0
 
 - 区分请求级 `selected_provider`、UMO `provider_perf_chat_completion` 和普通默认 Provider；明确选择先于严格全局优先级。

@@ -25,6 +25,7 @@ class RouterSettingsTests(unittest.TestCase):
             settings.provider_attempt_timeout_cooldown_seconds,
             300,
         )
+        self.assertEqual(settings.provider_policy_overrides, ())
 
     def test_provider_error_cooldown_can_be_configured(self) -> None:
         settings = RouterSettings.from_raw(
@@ -60,6 +61,81 @@ class RouterSettingsTests(unittest.TestCase):
         chain = ChainConfig(name="disabled", providers=["provider"], daily_limit_tokens=0)
 
         self.assertEqual(chain.limit(2_000_000), 0)
+
+    def test_provider_policy_overrides_are_parsed_by_exact_provider_id(
+        self,
+    ) -> None:
+        settings = RouterSettings.from_raw(
+            {
+                "provider_policy_overrides_json": """
+                [
+                  {
+                    "provider_id": "volcengine-agent-plan/doubao-seed-2.0-mini",
+                    "first_response_timeout_seconds": 3,
+                    "request_max_retries": 1,
+                    "max_output_tokens": 220
+                  }
+                ]
+                """
+            }
+        )
+
+        override = settings.provider_policy_override(
+            "VOLCENGINE-AGENT-PLAN/DOUBAO-SEED-2.0-MINI"
+        )
+        self.assertIsNotNone(override)
+        assert override is not None
+        self.assertEqual(override.first_response_timeout_seconds, 3)
+        self.assertEqual(override.request_max_retries, 1)
+        self.assertEqual(override.max_output_tokens, 220)
+        self.assertIsNone(settings.provider_policy_override("another/provider"))
+
+    def test_provider_policy_override_object_and_boundaries(self) -> None:
+        settings = RouterSettings.from_raw(
+            {
+                "provider_policy_overrides": {
+                    "provider/model": {
+                        "provider_id": "ignored/provider",
+                        "first_response_timeout_seconds": -3,
+                        "request_max_retries": 0,
+                        "max_output_tokens": -1,
+                    }
+                }
+            }
+        )
+
+        override = settings.provider_policy_override("provider/model")
+        self.assertIsNotNone(override)
+        assert override is not None
+        self.assertEqual(override.first_response_timeout_seconds, 0)
+        self.assertEqual(override.request_max_retries, 1)
+        self.assertEqual(override.max_output_tokens, 0)
+        self.assertIsNone(
+            settings.provider_policy_override("ignored/provider")
+        )
+
+    def test_duplicate_provider_policy_override_uses_last_entry(self) -> None:
+        settings = RouterSettings.from_raw(
+            {
+                "provider_policy_overrides": [
+                    {"provider_id": "provider/model", "max_output_tokens": 100},
+                    {"provider_id": "PROVIDER/MODEL", "max_output_tokens": 50},
+                ]
+            }
+        )
+
+        self.assertEqual(len(settings.provider_policy_overrides), 1)
+        override = settings.provider_policy_override("provider/model")
+        self.assertIsNotNone(override)
+        assert override is not None
+        self.assertEqual(override.provider_id, "PROVIDER/MODEL")
+        self.assertEqual(override.max_output_tokens, 50)
+
+    def test_invalid_provider_policy_override_json_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "not valid JSON"):
+            RouterSettings.from_raw(
+                {"provider_policy_overrides_json": "[{invalid]"}
+            )
 
 
 if __name__ == "__main__":

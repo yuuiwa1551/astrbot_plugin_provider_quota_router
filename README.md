@@ -20,6 +20,7 @@ AstrBot provider/model 日额度路由插件。它按配置的每日 token 额�
 - 只有 `volcengine_provider_source_ids` 指定的火山 Provider Source 使用本地 token 上限；按模型名统计时 SQL 还会限定到这些本地额度 Provider ID，付费 Token Plan 的同名模型不会串账。中转站、DeepSeek 及其他非火山 Provider 不阻断也不预占。
 - 默认把 `opencode-zen/` 从火山 token 安全阈值中排除；具体模型返回 `FreeUsageLimitError` 后，只冷却该模型，用户请求期间零外呼，后台探测成功后恢复，其他 opencode 模型继续可选。
 - opencode 额度保护同时覆盖 Agent 请求与图片描述等直接 Provider 调用；冷却期间直接调用会在发出网络请求前被拦截。
+- 可按完整 Provider ID 为 OpenAI-compatible 调用设置专属首响应、请求次数和输出 Token 上限；直接调用与 Agent 调用共用同一份不可变 Provider 策略，未命中覆盖时沿用全局配置。
 - Provider/SDK 自己报告的超时、连接失败、普通 429、5xx 等明确故障默认只冷却实际失败模型 30 分钟；插件自己的单次 20 秒首响应预算耗尽只 fallback，5 分钟内连续两次才短冷却 5 分钟。未知边界异常也短冷却 5 分钟。上下文、模态、工具、附件、内容审核和 400/422 请求错误不污染模型健康状态。
 - Agent 当前模型失败后使用插件过滤过的安全 fallback；候选按本次请求顺序和独立数量上限按需计算，默认一条消息最多再试一个安全模型。
 - 火山开发者计划明确返回 `AccountOverdueError` 等账号级故障后，整组火山模型熔断 30 分钟；普通请求级 403 不连坐。到期由后台从同 Source 的 token 安全文本模型中探测，成功才恢复整组。
@@ -63,6 +64,7 @@ AstrBot provider/model 日额度路由插件。它按配置的每日 token 额�
 | `provider_error_request_max_retries` | `1` | 每个受管模型在当前调用中的最大尝试次数；失败后立即切换 |
 | `provider_error_fallback_max_candidates` | `1` | 当前消息最多继续尝试的安全备用 Provider 数；`0` 表示不继续逐层尝试 |
 | `provider_error_attempt_timeout_seconds` | `20` | OpenAI-compatible 模型首响应墙钟预算；耗尽后结束当前尝试并 fallback，`0` 表示关闭 |
+| `provider_policy_overrides_json` | 空 | 按完整 Provider ID 覆盖首响应秒数、请求次数和输出 Token 上限；未命中时使用全局值 |
 | `provider_attempt_timeout_failure_threshold` | `2` | 统计窗口内连续多少次本地首响应超时才开启短冷却；成功会清零 |
 | `provider_attempt_timeout_failure_window_seconds` | `300` | 本地首响应超时连续计数窗口 |
 | `provider_attempt_timeout_cooldown_seconds` | `300` | 达到连续阈值后的模型短冷却 |
@@ -93,6 +95,21 @@ AstrBot provider/model 日额度路由插件。它按配置的每日 token 额�
 ```
 
 当 `chains_json` 非空时，自定义链优先，`cmd_config.json` 监视器不会覆盖它。使用 AstrBot 默认链时，插件会校验配置文件读取前后的文件签名；遇到配置正在写入、JSON 无效或链为空，会继续保留上一份有效链，并把错误暴露到状态 API 和 Plugin Page。
+
+Provider 专属调用预算示例：
+
+```json
+[
+  {
+    "provider_id": "volcengine-agent-plan/doubao-seed-2.0-mini",
+    "first_response_timeout_seconds": 3,
+    "request_max_retries": 1,
+    "max_output_tokens": 220
+  }
+]
+```
+
+覆盖按完整 Provider ID（不区分大小写）精确匹配。`first_response_timeout_seconds=0` 关闭该 Provider 的插件首响应计时，`max_output_tokens=0` 不设置输出上限。输出上限不会放大调用方已有的小值；例如调用方请求 15 Token 时仍保持 15。为避免正常长回答被截断，建议只给辅助用途的专用 Provider 配置输出上限。
 
 ## 命令
 
@@ -164,7 +181,7 @@ AstrBot 的 LLM 流程里，`on_waiting_llm_request` 在 main agent 构建和 pr
 
 `provider_error_cooldown_enabled=true` 时，错误先经过统一分类。Provider/SDK 自己抛出的超时、连接失败、408、普通 429、5xx 使用 1800 秒模型健康冷却；未知 Provider 边界异常默认短冷却 300 秒；上下文过长、模态/工具不支持、附件非法、内容审核和 400/422 请求错误不写健康状态。`FreeUsageLimitError` 只写 opencode 上游额度状态，明确 `AccountOverdueError` 才允许打开火山 Source 熔断。
 
-`provider_error_attempt_timeout_seconds=20` 会限制 OpenAI-compatible 模型等待首个响应的时间。普通调用在 20 秒内未完成、流式调用在 20 秒内没有首个 chunk，都会结束当前尝试并立即 fallback；后续流式输出不受这个首响应计时器限制。单次本地墙钟预算耗尽不能证明上游故障，因此不会直接写 30 分钟健康冷却。默认同一 Provider 在 `provider_attempt_timeout_failure_window_seconds=300` 内连续达到 `provider_attempt_timeout_failure_threshold=2` 次才短冷却 `provider_attempt_timeout_cooldown_seconds=300` 秒；任一次成功会清零连续计数。Provider 自己抛出的真实超时仍按明确瞬态故障立即冷却 30 分钟。引用消息里的图片和语音会递归识别，路由阶段不会再先选纯文本模型后被 AstrBot 核心打回正在冷却的多模态模型。
+`provider_error_attempt_timeout_seconds=20` 会限制 OpenAI-compatible 模型等待首个响应的时间。普通调用在 20 秒内未完成、流式调用在 20 秒内没有首个 chunk，都会结束当前尝试并立即 fallback；后续流式输出不受这个首响应计时器限制。`provider_policy_overrides_json` 命中完整 Provider ID 时，可把该 Provider 的首响应和请求次数替换为专属值，并在调用边界收紧 `max_tokens/max_completion_tokens`；未命中的 Provider 不受影响。单次本地墙钟预算耗尽不能证明上游故障，因此不会直接写 30 分钟健康冷却。默认同一 Provider 在 `provider_attempt_timeout_failure_window_seconds=300` 内连续达到 `provider_attempt_timeout_failure_threshold=2` 次才短冷却 `provider_attempt_timeout_cooldown_seconds=300` 秒；任一次成功会清零连续计数。Provider 自己抛出的真实超时仍按明确瞬态故障立即冷却 30 分钟。引用消息里的图片和语音会递归识别，路由阶段不会再先选纯文本模型后被 AstrBot 核心打回正在冷却的多模态模型。
 
 默认 fallback 链在每次 LLM 请求前对 `data/cmd_config.json` 做一次轻量 `stat`；只有签名变化时才使用 `utf-8-sig` 读取 JSON 并原子替换 router，因此修改列表后的下一条消息即可看到新链。同时保留低频后台任务，默认每 300 秒在无请求时兜底检查一次。文件有其他配置变化但 fallback 内容相同时，不重建 router。
 
@@ -192,6 +209,12 @@ AstrBot 的最终 `role=err` 响应不会经过普通的 Agent done hook，因�
 - Future：火山引擎官方用量 API 对账、按 API key/account 分组额度、与 provider 负载均衡插件集成。
 
 ## 更新历史
+
+### v0.14.0
+
+- 支持按完整 Provider ID 设置专属首响应、请求次数与最大输出 Token。
+- 专属策略覆盖 Agent 与直连 OpenAI-compatible 调用；输出 Token 只做上限，不放大调用方已有值。
+- 未命中覆盖的 Provider 保持原有全局策略，便于把快速止损只用于辅助专用模型。
 
 ### v0.13.0
 

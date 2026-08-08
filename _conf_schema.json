@@ -183,6 +183,12 @@
     "hint": "OpenAI-compatible 模型在该时间内没有返回首个响应就立即结束当前尝试并切换。默认 20 秒；设为 0 关闭插件超时。单次本地预算耗尽不会直接判定上游故障。",
     "default": 20
   },
+  "provider_policy_overrides_json": {
+    "description": "Provider 专属调用预算 JSON",
+    "type": "text",
+    "hint": "按完整 Provider ID 覆盖首响应秒数、单模型请求次数和输出 Token 上限。格式：[{\"provider_id\":\"source/model\",\"first_response_timeout_seconds\":3,\"request_max_retries\":1,\"max_output_tokens\":220}]。超时或输出上限设为 0 表示关闭该项。",
+    "default": ""
+  },
   "provider_attempt_timeout_failure_threshold": {
     "description": "本地首响应超时连续阈值",
     "type": "int",

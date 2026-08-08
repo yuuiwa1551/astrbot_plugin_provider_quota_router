@@ -86,6 +86,7 @@ def install_opencode_quota_guard(
         await _raise_if_cooling(state, provider)
         await _report_attempt(state, provider)
         kwargs = _with_request_max_retries(state, provider, kwargs)
+        kwargs = _with_max_output_tokens(state, provider, kwargs)
         try:
             call = state["original_text_chat"](provider, *args, **kwargs)
             response = await _with_attempt_timeout(state, provider, call)
@@ -110,6 +111,7 @@ def install_opencode_quota_guard(
         await _raise_if_cooling(state, provider)
         await _report_attempt(state, provider)
         kwargs = _with_request_max_retries(state, provider, kwargs)
+        kwargs = _with_max_output_tokens(state, provider, kwargs)
         stream = state["original_text_chat_stream"](provider, *args, **kwargs)
         iterator = stream.__aiter__()
         try:
@@ -198,6 +200,45 @@ def _with_request_max_retries(
         return kwargs
     guarded_kwargs = dict(kwargs)
     guarded_kwargs["request_max_retries"] = min(values)
+    return guarded_kwargs
+
+
+def _with_max_output_tokens(
+    state: dict[str, Any],
+    provider: Any,
+    kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    values: list[int] = []
+    for owner in tuple(state["owners"]):
+        getter = getattr(owner, "opencode_quota_guard_max_output_tokens", None)
+        if not callable(getter):
+            continue
+        try:
+            value = int(getter(provider) or 0)
+        except Exception:  # noqa: BLE001
+            continue
+        if value > 0:
+            values.append(value)
+    if not values:
+        return kwargs
+
+    cap = min(values)
+    guarded_kwargs = dict(kwargs)
+    token_keys = (
+        key
+        for key in ("max_tokens", "max_completion_tokens")
+        if key in guarded_kwargs
+    )
+    found_token_key = False
+    for key in token_keys:
+        found_token_key = True
+        try:
+            requested = int(guarded_kwargs[key])
+        except (TypeError, ValueError):
+            requested = 0
+        guarded_kwargs[key] = min(requested, cap) if requested > 0 else cap
+    if not found_token_key:
+        guarded_kwargs["max_tokens"] = cap
     return guarded_kwargs
 
 

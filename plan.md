@@ -273,3 +273,16 @@ deepseek/deepseek-v4-pro
 - 未显式选择时继续遵循 `strict_priority_order`，不重新引入会话粘滞。
 - RoutePlan 固化本次候选顺序、选择来源和规划耗时。
 - 新增 `provider_error_fallback_max_candidates`，默认一条消息最多注入并尝试一个安全备用 Provider。
+
+## 18期 专用 Provider 调用预算
+
+目标：只在 quota router 中为直连辅助模型设置独立的首响应、重试和输出预算，不修改 Stealer、Affection 等调用方代码，也不缩短其他主模型的全局 20 秒预算。
+
+状态：v0.14.0 已完成并部署到实时 AstrBot；容器内 109 项测试通过，认证状态 API、Mini Provider 直测和 1.68 秒 WebChat 端到端请求均已验证，详见 `18期plan.md`。
+
+计划交付：
+
+- 新增按完整 Provider ID 解析的不可变策略覆盖。
+- Provider guard 对普通与流式直连调用统一应用专属首响应超时和单 Provider 重试次数。
+- 输出 Token 只做上限，不放大调用方已有的小值。
+- 本机将火山 Plan Doubao 2.0 Mini 设为辅助专用的 3 秒、1 次、220 Token 策略。
