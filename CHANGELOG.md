@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.14.1
+
+- 新增管理员命令 `/quota unpin`，删除当前 UMO 的 `provider_perf_chat_completion`，让后续消息恢复跟随全局配置和 quota router 自动选路。
+- 命令不修改全局默认 Provider、请求级 `selected_provider`、额度、冷却、熔断、会话历史或其他会话规则；无指定时可安全重复执行。
+- 存储失败时返回明确错误并记录平台日志，不报告虚假成功。
+- 增加严格匹配的 `/quota unpin` 兼容入口；即使 `/` 未配置为 AstrBot 唤醒前缀，也不会落入普通 LLM 对话。
+- 版本统一为 0.14.1。
+
 ## v0.14.0
 
 - 新增 `provider_policy_overrides_json`，可按完整 Provider ID 单独覆盖首响应预算、单 Provider 请求次数和最大输出 Token，不改变未命中 Provider 的全局策略。

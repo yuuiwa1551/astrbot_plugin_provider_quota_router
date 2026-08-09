@@ -83,7 +83,7 @@ from .core.time_window import current_window, window_for_local_date
 
 
 PLUGIN_NAME = "astrbot_plugin_provider_quota_router"
-PLUGIN_VERSION = "0.14.0"
+PLUGIN_VERSION = "0.14.1"
 PLUGIN_REPOSITORY = "https://github.com/yuuiwa1551/astrbot_plugin_provider_quota_router"
 PLUGIN_DESCRIPTION = "按 provider/model 每日 token 额度自动降级路由 AstrBot 聊天模型。"
 HOOK_PRIORITY = 900
@@ -1522,6 +1522,10 @@ class ProviderQuotaRouterPlugin(Star):
             yield event.plain_result("没有权限执行 quota 管理命令。")
             return
 
+        if subcommand == "unpin":
+            yield event.plain_result(await self._unpin_provider_preference(event))
+            return
+
         if subcommand == "reload":
             self._reload_runtime_settings()
             self._sync_core_fallback_guard()
@@ -1561,8 +1565,18 @@ class ProviderQuotaRouterPlugin(Star):
             return
 
         yield event.plain_result(
-            "用法：/quota status | /quota reload | /quota reset-cache | /quota dry-run on|off"
+            "用法：/quota status | /quota unpin | /quota reload | "
+            "/quota reset-cache | /quota dry-run on|off"
         )
+
+    @filter.regex(r"(?i)^/quota\s+unpin\s*$")
+    async def quota_unpin_slash_command(self, event: AstrMessageEvent):
+        """兼容未把斜杠配置为 wake_prefix 的部署。"""
+        if not self._is_admin(event):
+            yield event.plain_result("没有权限执行 quota 管理命令。")
+        else:
+            yield event.plain_result(await self._unpin_provider_preference(event))
+        event.stop_event()
 
     async def api_get_status(self) -> dict:
         try:
@@ -1895,6 +1909,48 @@ class ProviderQuotaRouterPlugin(Star):
         return ProviderSelection(
             provider_id=self._current_provider_id(event),
             origin="default",
+        )
+
+    async def _unpin_provider_preference(self, event: AstrMessageEvent) -> str:
+        umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
+        if not umo:
+            return "无法识别当前会话，未修改对话 Provider 指定。"
+
+        try:
+            previous = await sp.session_get(
+                umo,
+                SESSION_PROVIDER_PREFERENCE_KEY,
+                None,
+            )
+            await sp.session_remove(umo, SESSION_PROVIDER_PREFERENCE_KEY)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "[ProviderQuotaRouter] failed to clear UMO provider preference: "
+                "origin=%s error=%s",
+                umo,
+                exc,
+                exc_info=True,
+            )
+            return "取消当前会话的固定对话 Provider 失败，请查看平台日志。"
+
+        previous_id = previous.strip() if isinstance(previous, str) else ""
+        if not previous_id:
+            logger.info(
+                "[ProviderQuotaRouter] UMO provider preference already absent: "
+                "origin=%s",
+                umo,
+            )
+            return "当前会话没有固定对话 Provider，已经在跟随全局配置。"
+
+        logger.info(
+            "[ProviderQuotaRouter] UMO provider preference cleared: "
+            "origin=%s previous=%s",
+            umo,
+            previous_id,
+        )
+        return (
+            f"已取消当前会话的固定对话 Provider：{previous_id}。"
+            "下一条消息起跟随全局配置，由 quota router 自动选路。"
         )
 
     def _current_provider_id(self, event: AstrMessageEvent) -> str:

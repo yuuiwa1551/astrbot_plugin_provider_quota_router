@@ -286,3 +286,16 @@ deepseek/deepseek-v4-pro
 - Provider guard 对普通与流式直连调用统一应用专属首响应超时和单 Provider 重试次数。
 - 输出 Token 只做上限，不放大调用方已有的小值。
 - 本机将火山 Plan Doubao 2.0 Mini 设为辅助专用的 3 秒、1 次、220 Token 策略。
+
+## 19期 会话 Provider 指定解除命令
+
+目标：让管理员无需进入 WebUI，即可在当前群聊或私聊中真正删除 UMO 范围的固定对话 Provider，恢复由全局配置和 quota router 自动选路。
+
+状态：v0.14.1 已完成并部署到实时 AstrBot；容器内 115 项测试通过，字面量 `/quota unpin` 已由临时 WebChat 会话验证确实删除 UMO Provider 偏好，详见 `19期plan.md`。
+
+计划交付：
+
+- 新增管理员命令 `/quota unpin`。
+- 字面量 `/quota unpin` 不依赖 `/` 是否列入 AstrBot `wake_prefix`，并保留标准唤醒前缀写法。
+- 只删除当前 UMO 的 `provider_perf_chat_completion`，不改其他会话规则、额度、冷却或熔断状态。
+- 对没有固定 Provider 的会话保持幂等，并对存储失败返回明确错误。

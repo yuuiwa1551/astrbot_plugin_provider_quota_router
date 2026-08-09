@@ -114,11 +114,16 @@ Provider 专属调用预算示例：
 ## 命令
 
 - `/quota status`：查看当前窗口各 provider/model 用量。
+- `/quota unpin`：删除当前群聊或私聊的固定对话 Provider，恢复跟随全局配置和 quota router 自动选路；即使 `/` 未配置为 AstrBot 唤醒前缀也可直接使用。
 - `/quota reload`：重载插件配置。
 - `/quota reset-cache`：清理本地 pending/overlay 缓存，不删除 AstrBot 原生数据库，也不清除费用保护冷却。
 - `/quota dry-run on|off`：临时切换演练模式。
 
 `admin_user_ids` 为空时管理命令沿用 AstrBot 核心管理员权限；填写后这些 ID 作为额外管理员和错误通知目标。`allow_status_for_all=false` 时，状态查看也会限制为管理员。
+
+`/quota unpin` 只删除当前 UMO 的 `provider_perf_chat_completion`。它不会修改全局默认 Provider、单次请求由其他插件注入的 `selected_provider`、额度、冷却、熔断、会话历史或其他会话规则；没有固定 Provider 时重复执行也是安全的。
+
+标准的唤醒前缀写法也保留，例如唤醒前缀为 `.` 时可使用 `.quota unpin`。插件额外注册了严格匹配的 `/quota unpin` 兼容入口，避免斜杠未列入 `wake_prefix` 时被当成普通聊天。
 
 ## WebUI
 
@@ -209,6 +214,12 @@ AstrBot 的最终 `role=err` 响应不会经过普通的 Agent done hook，因�
 - Future：火山引擎官方用量 API 对账、按 API key/account 分组额度、与 provider 负载均衡插件集成。
 
 ## 更新历史
+
+### v0.14.1
+
+- 新增管理员命令 `/quota unpin`，可在当前群聊或私聊中取消固定对话 Provider 并恢复自动路由。
+- 命令仅删除当前 UMO 的 Provider 偏好；没有指定时保持幂等，存储失败时不会返回虚假成功。
+- 增加字面量 `/quota unpin` 兼容入口，不依赖部署是否把 `/` 配置为 AstrBot 唤醒前缀。
 
 ### v0.14.0
 
