@@ -7,9 +7,11 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from .affinity import AffinityCommitResult, AffinityLookup, RouteAffinity
 
-STATE_VERSION = 7
+STATE_VERSION = 8
 DECISION_LOG_MAX_BYTES = 5 * 1024 * 1024
+AFFINITY_CLEAR_WATERMARK_TTL_SECONDS = 7 * 86_400
 
 
 class QuotaStateStore:
@@ -619,6 +621,205 @@ class QuotaStateStore:
             self._save_state(state)
             return True
 
+    async def lookup_route_affinity(
+        self,
+        *,
+        conversation_key: str,
+        modality: str,
+        now: float | None = None,
+    ) -> AffinityLookup:
+        async with self._lock:
+            state = self._load_state()
+            clock = time.time() if now is None else float(now)
+            bucket = (state.get("route_affinities", {}) or {}).get(
+                conversation_key,
+                {},
+            )
+            raw = bucket.get(modality) if isinstance(bucket, dict) else None
+            affinity = RouteAffinity.from_mapping(
+                conversation_key=conversation_key,
+                modality=modality,
+                value=raw,
+            )
+            if raw is None:
+                status = "miss"
+            elif affinity is None:
+                status = "invalid"
+            elif affinity.expires_at <= clock:
+                status = "expired"
+            else:
+                status = "hit"
+            changed = self._prune_state(state, now=clock)
+            if changed:
+                self._save_state(state)
+            return AffinityLookup(status=status, affinity=affinity)
+
+    async def commit_route_affinity(
+        self,
+        *,
+        conversation_key: str,
+        modality: str,
+        provider_id: str,
+        provider_model: str,
+        request_started_at: float,
+        ttl_seconds: int,
+        expected_generation: str = "",
+        planned_affinity_provider_id: str = "",
+        now: float | None = None,
+    ) -> AffinityCommitResult:
+        async with self._lock:
+            state = self._load_state()
+            clock = time.time() if now is None else float(now)
+            self._prune_state(state, now=clock)
+            clear_watermark = float(
+                (state.get("route_affinity_clear_watermarks", {}) or {}).get(
+                    conversation_key,
+                    0,
+                )
+                or 0
+            )
+            if request_started_at <= clear_watermark:
+                self._save_state(state)
+                return AffinityCommitResult(status="cleared")
+
+            affinities = state.setdefault("route_affinities", {})
+            bucket = affinities.setdefault(conversation_key, {})
+            current = RouteAffinity.from_mapping(
+                conversation_key=conversation_key,
+                modality=modality,
+                value=bucket.get(modality),
+            )
+            if (
+                current is not None
+                and request_started_at < current.last_request_started_at
+            ):
+                self._save_state(state)
+                return AffinityCommitResult(status="stale", affinity=current)
+
+            planned_provider_id = str(planned_affinity_provider_id or "")
+            is_same_planned_provider = bool(
+                planned_provider_id and provider_id == planned_provider_id
+            )
+            if is_same_planned_provider:
+                if current is None:
+                    self._save_state(state)
+                    return AffinityCommitResult(status="expired")
+                if (
+                    not expected_generation
+                    or current.generation != expected_generation
+                ):
+                    self._save_state(state)
+                    return AffinityCommitResult(status="stale", affinity=current)
+                if current.provider_model == provider_model:
+                    updated = RouteAffinity(
+                        conversation_key=current.conversation_key,
+                        modality=current.modality,
+                        provider_id=current.provider_id,
+                        provider_model=current.provider_model,
+                        assigned_at=current.assigned_at,
+                        expires_at=current.expires_at,
+                        last_request_started_at=max(
+                            current.last_request_started_at,
+                            request_started_at,
+                        ),
+                        generation=current.generation,
+                    )
+                    bucket[modality] = updated.to_mapping()
+                    self._save_state(state)
+                    return AffinityCommitResult(
+                        status="unchanged",
+                        affinity=updated,
+                    )
+
+            if (
+                current is not None
+                and current.provider_id == provider_id
+                and current.provider_model == provider_model
+            ):
+                updated = RouteAffinity(
+                    conversation_key=current.conversation_key,
+                    modality=current.modality,
+                    provider_id=current.provider_id,
+                    provider_model=current.provider_model,
+                    assigned_at=current.assigned_at,
+                    expires_at=current.expires_at,
+                    last_request_started_at=max(
+                        current.last_request_started_at,
+                        request_started_at,
+                    ),
+                    generation=current.generation,
+                )
+                bucket[modality] = updated.to_mapping()
+                self._save_state(state)
+                return AffinityCommitResult(status="unchanged", affinity=updated)
+
+            previous_provider_id = current.provider_id if current else None
+            affinity = RouteAffinity(
+                conversation_key=conversation_key,
+                modality=modality,
+                provider_id=provider_id,
+                provider_model=provider_model,
+                assigned_at=clock,
+                expires_at=clock + max(60, int(ttl_seconds)),
+                last_request_started_at=request_started_at,
+                generation=uuid4().hex,
+            )
+            bucket[modality] = affinity.to_mapping()
+            self._save_state(state)
+            return AffinityCommitResult(
+                status="replaced" if current else "created",
+                affinity=affinity,
+                previous_provider_id=previous_provider_id,
+            )
+
+    async def remove_route_affinity(
+        self,
+        *,
+        conversation_key: str,
+        modality: str,
+        generation: str = "",
+    ) -> bool:
+        async with self._lock:
+            state = self._load_state()
+            self._prune_state(state)
+            affinities = state.get("route_affinities", {}) or {}
+            bucket = affinities.get(conversation_key)
+            if not isinstance(bucket, dict) or modality not in bucket:
+                return False
+            current = RouteAffinity.from_mapping(
+                conversation_key=conversation_key,
+                modality=modality,
+                value=bucket.get(modality),
+            )
+            if generation and (
+                current is None or current.generation != generation
+            ):
+                return False
+            bucket.pop(modality, None)
+            if not bucket:
+                affinities.pop(conversation_key, None)
+            self._save_state(state)
+            return True
+
+    async def clear_route_affinities(
+        self,
+        *,
+        conversation_key: str,
+        now: float | None = None,
+    ) -> int:
+        async with self._lock:
+            state = self._load_state()
+            clock = time.time() if now is None else float(now)
+            self._prune_state(state, now=clock)
+            affinities = state.get("route_affinities", {}) or {}
+            bucket = affinities.pop(conversation_key, {})
+            removed = len(bucket) if isinstance(bucket, dict) else 0
+            state.setdefault("route_affinity_clear_watermarks", {})[
+                conversation_key
+            ] = clock
+            self._save_state(state)
+            return removed
+
     async def snapshot(self) -> dict[str, Any]:
         async with self._lock:
             state = self._load_state()
@@ -650,6 +851,10 @@ class QuotaStateStore:
                     ),
                     "notification_throttles": state.get(
                         "notification_throttles", {}
+                    ),
+                    "route_affinities": state.get("route_affinities", {}),
+                    "route_affinity_clear_watermarks": state.get(
+                        "route_affinity_clear_watermarks", {}
                     ),
                 }
             )
@@ -691,6 +896,8 @@ class QuotaStateStore:
         data.setdefault("provider_model_circuits", {})
         data.setdefault("provider_group_circuits", {})
         data.setdefault("notification_throttles", {})
+        data.setdefault("route_affinities", {})
+        data.setdefault("route_affinity_clear_watermarks", {})
         if not isinstance(data["pending"], dict):
             data["pending"] = {}
         if not isinstance(data["overlays"], list):
@@ -746,6 +953,10 @@ class QuotaStateStore:
             data["provider_group_circuits"] = {}
         if not isinstance(data["notification_throttles"], dict):
             data["notification_throttles"] = {}
+        if not isinstance(data["route_affinities"], dict):
+            data["route_affinities"] = {}
+        if not isinstance(data["route_affinity_clear_watermarks"], dict):
+            data["route_affinity_clear_watermarks"] = {}
         return data
 
     @staticmethod
@@ -759,6 +970,8 @@ class QuotaStateStore:
             "provider_model_circuits": {},
             "provider_group_circuits": {},
             "notification_throttles": {},
+            "route_affinities": {},
+            "route_affinity_clear_watermarks": {},
         }
 
     def _save_state(self, state: dict[str, Any]) -> None:
@@ -776,9 +989,13 @@ class QuotaStateStore:
         self.last_load_error = None
 
     @staticmethod
-    def _prune_state(state: dict[str, Any]) -> bool:
+    def _prune_state(
+        state: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> bool:
         changed = False
-        now = time.time()
+        now = time.time() if now is None else float(now)
         pending = state.get("pending", {})
         if isinstance(pending, dict):
             cleaned_pending = {
@@ -857,6 +1074,38 @@ class QuotaStateStore:
             }
             changed = changed or len(cleaned_throttles) != len(throttles)
             state["notification_throttles"] = cleaned_throttles
+        affinities = state.get("route_affinities", {})
+        if isinstance(affinities, dict):
+            cleaned_affinities: dict[str, dict[str, Any]] = {}
+            for conversation_key, bucket in affinities.items():
+                if not isinstance(bucket, dict):
+                    continue
+                cleaned_bucket: dict[str, Any] = {}
+                for modality, value in bucket.items():
+                    affinity = RouteAffinity.from_mapping(
+                        conversation_key=str(conversation_key),
+                        modality=str(modality),
+                        value=value,
+                    )
+                    if affinity is None or affinity.expires_at <= now:
+                        continue
+                    cleaned_bucket[str(modality)] = affinity.to_mapping()
+                if cleaned_bucket:
+                    cleaned_affinities[str(conversation_key)] = cleaned_bucket
+            changed = changed or cleaned_affinities != affinities
+            state["route_affinities"] = cleaned_affinities
+        clear_watermarks = state.get("route_affinity_clear_watermarks", {})
+        if isinstance(clear_watermarks, dict):
+            cleaned_watermarks: dict[str, float] = {}
+            for conversation_key, value in clear_watermarks.items():
+                try:
+                    cleared_at = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if now - cleared_at < AFFINITY_CLEAR_WATERMARK_TTL_SECONDS:
+                    cleaned_watermarks[str(conversation_key)] = cleared_at
+            changed = changed or cleaned_watermarks != clear_watermarks
+            state["route_affinity_clear_watermarks"] = cleaned_watermarks
         return changed
 
     def _backup_corrupt_state(self) -> None:

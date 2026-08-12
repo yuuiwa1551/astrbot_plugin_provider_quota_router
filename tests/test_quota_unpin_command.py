@@ -4,8 +4,10 @@ import importlib
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+from core.affinity import conversation_affinity_key
 from core.config import RouterSettings
 
 
@@ -48,6 +50,9 @@ class QuotaUnpinCommandTests(unittest.IsolatedAsyncioTestCase):
     def make_plugin(self) -> ProviderQuotaRouterPlugin:
         plugin = object.__new__(ProviderQuotaRouterPlugin)
         plugin.settings = RouterSettings(admin_user_ids=set())
+        plugin.state = SimpleNamespace(
+            clear_route_affinities=AsyncMock(return_value=0)
+        )
         return plugin
 
     async def test_admin_clears_current_umo_provider_preference(self) -> None:
@@ -71,9 +76,14 @@ class QuotaUnpinCommandTests(unittest.IsolatedAsyncioTestCase):
             event.unified_msg_origin,
             PREFERENCE_KEY,
         )
+        plugin.state.clear_route_affinities.assert_awaited_once_with(
+            conversation_key=conversation_affinity_key(
+                event.unified_msg_origin
+            )
+        )
         self.assertEqual(len(replies), 1)
         self.assertIn("deepseek/deepseek-v4-flash", replies[0])
-        self.assertIn("自动选路", replies[0])
+        self.assertIn("全局优先级选路", replies[0])
 
     async def test_unpin_is_idempotent_without_saved_preference(self) -> None:
         plugin = self.make_plugin()
@@ -96,7 +106,10 @@ class QuotaUnpinCommandTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             replies,
-            ["当前会话没有固定对话 Provider，已经在跟随全局配置。"],
+            [
+                "当前会话没有固定对话 Provider 或自动路由亲和，"
+                "已经在跟随全局配置。"
+            ],
         )
 
     async def test_non_admin_cannot_clear_preference(self) -> None:
@@ -137,37 +150,79 @@ class QuotaUnpinCommandTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             replies,
-            ["取消当前会话的固定对话 Provider 失败，请查看平台日志。"],
+            [
+                "清理当前会话的固定对话 Provider 或自动路由亲和失败，"
+                "请查看平台日志。"
+            ],
         )
         log_error.assert_called_once()
 
-    async def test_literal_slash_command_works_without_slash_wake_prefix(self) -> None:
+    async def test_affinity_only_unpin_is_reported(self) -> None:
         plugin = self.make_plugin()
         event = FakeEvent()
-        unpin = AsyncMock(return_value="unpin complete")
-        plugin._unpin_provider_preference = unpin
+        plugin.state.clear_route_affinities = AsyncMock(return_value=2)
 
-        replies = [
-            reply async for reply in plugin.quota_unpin_slash_command(event)
-        ]
+        with (
+            patch.object(
+                PLUGIN_MODULE.sp,
+                "session_get",
+                new=AsyncMock(return_value=None),
+            ),
+            patch.object(
+                PLUGIN_MODULE.sp,
+                "session_remove",
+                new=AsyncMock(),
+            ),
+        ):
+            replies = await collect_replies(plugin, event)
 
-        self.assertEqual(replies, ["unpin complete"])
-        unpin.assert_awaited_once_with(event)
-        self.assertTrue(event.stopped)
+        self.assertEqual(
+            replies,
+            [
+                "已清除2 个模态的自动路由亲和。"
+                "下一条消息起重新按全局优先级选路。"
+            ],
+        )
 
-    async def test_literal_slash_command_rejects_non_admin(self) -> None:
+    async def test_affinity_storage_failure_is_not_reported_as_success(self) -> None:
         plugin = self.make_plugin()
-        event = FakeEvent(is_admin=False)
-        unpin = AsyncMock(return_value="must not run")
-        plugin._unpin_provider_preference = unpin
+        event = FakeEvent()
+        plugin.state.clear_route_affinities = AsyncMock(
+            side_effect=RuntimeError("state unavailable")
+        )
+
+        with (
+            patch.object(
+                PLUGIN_MODULE.sp,
+                "session_get",
+                new=AsyncMock(return_value=None),
+            ),
+            patch.object(
+                PLUGIN_MODULE.sp,
+                "session_remove",
+                new=AsyncMock(),
+            ),
+            patch.object(PLUGIN_MODULE.logger, "error", new=Mock()),
+        ):
+            replies = await collect_replies(plugin, event)
+
+        self.assertIn("失败", replies[0])
+
+    async def test_help_uses_only_configured_dot_prefixes(self) -> None:
+        plugin = self.make_plugin()
+        event = FakeEvent()
 
         replies = [
-            reply async for reply in plugin.quota_unpin_slash_command(event)
+            reply async for reply in plugin.quota_command(event, "unknown")
         ]
 
-        self.assertEqual(replies, ["没有权限执行 quota 管理命令。"])
-        unpin.assert_not_awaited()
-        self.assertTrue(event.stopped)
+        self.assertIn(".quota", replies[0])
+        self.assertNotIn("/quota", replies[0])
+
+    def test_literal_slash_handler_is_not_registered(self) -> None:
+        self.assertFalse(
+            hasattr(ProviderQuotaRouterPlugin, "quota_unpin_slash_command")
+        )
 
 
 if __name__ == "__main__":

@@ -35,9 +35,9 @@ data/plugins/astrbot_plugin_provider_quota_router/
 - 在响应后释放 reservation 并记录实际 usage。
 - 写 `route_decisions.jsonl`。
 - 提供管理员命令：
-  - `/quota status`
-  - `/quota reload`
-  - `/quota reset-cache`
+  - `.quota status` / `。quota status`
+  - `.quota reload` / `。quota reload`
+  - `.quota reset-cache` / `。quota reset-cache`
 
 ## 默认配置
 
@@ -84,7 +84,7 @@ data/plugins/astrbot_plugin_provider_quota_router/
 - 已实现 `on_waiting_llm_request(priority=900)` 预路由。
 - 已实现 `on_llm_request` 链路耗尽阻断。
 - 已实现 `on_agent_done` 释放 pending reservation 并记录短期 overlay。
-- 已实现 `/quota status`、`/quota reload`、`/quota reset-cache`、`/quota dry-run on|off`。
+- 已实现遵循 `wake_prefix` 的 `.quota status`、`.quota reload`、`.quota reset-cache`、`.quota dry-run on|off`，中文句号前缀同样可用。
 - 已补充 README、CHANGELOG 和本地 spec/plan 备份。
 
 ## 暂不处理

@@ -422,6 +422,132 @@ class RouterSafetyTests(unittest.IsolatedAsyncioTestCase):
             ("provider-c", "provider-a", "provider-b"),
         )
 
+    async def test_route_affinity_is_tried_before_global_chain(self) -> None:
+        providers = {
+            "provider-a": make_provider("provider-a", ["text"]),
+            "provider-b": make_provider("provider-b", ["text"]),
+            "provider-c": make_provider("provider-c", ["text"]),
+        }
+        router = ProviderQuotaRouter(
+            settings=RouterSettings(
+                default_safety_buffer_tokens=0,
+                default_request_reservation_tokens=0,
+                strict_priority_order=True,
+                chains=[ChainConfig(name="test", providers=list(providers))],
+            ),
+            ledger=MapLedger({}),
+            state=FakeState(),
+            get_provider=providers.get,
+        )
+
+        decision = await router.decide(
+            current_provider_id="provider-a",
+            window=SimpleNamespace(window_id="test-window"),
+            preferred_provider_id="provider-c",
+        )
+
+        self.assertEqual(decision.action, "switch")
+        self.assertEqual(decision.selected_provider_id, "provider-c")
+        self.assertEqual(
+            decision.provider_order,
+            ("provider-c", "provider-a", "provider-b"),
+        )
+
+    async def test_explicit_selection_ignores_route_affinity(self) -> None:
+        providers = {
+            "provider-a": make_provider("provider-a", ["text"]),
+            "provider-b": make_provider("provider-b", ["text"]),
+            "provider-c": make_provider("provider-c", ["text"]),
+        }
+        router = ProviderQuotaRouter(
+            settings=RouterSettings(
+                default_safety_buffer_tokens=0,
+                default_request_reservation_tokens=0,
+                strict_priority_order=True,
+                chains=[ChainConfig(name="test", providers=list(providers))],
+            ),
+            ledger=MapLedger({}),
+            state=FakeState(),
+            get_provider=providers.get,
+        )
+
+        decision = await router.decide(
+            current_provider_id="provider-b",
+            window=SimpleNamespace(window_id="test-window"),
+            explicit_provider_selection=True,
+            preferred_provider_id="provider-c",
+        )
+
+        self.assertEqual(decision.selected_provider_id, "provider-b")
+        self.assertEqual(
+            decision.provider_order,
+            ("provider-b", "provider-a", "provider-c"),
+        )
+
+    async def test_affinity_does_not_bypass_daily_quota(self) -> None:
+        providers = {
+            "provider-a": make_provider("provider-a", ["text"]),
+            "openai/provider-b": make_provider(
+                "openai/provider-b",
+                ["text"],
+                "openai",
+            ),
+        }
+        router = ProviderQuotaRouter(
+            settings=RouterSettings(
+                default_daily_limit_tokens=100,
+                default_safety_buffer_tokens=0,
+                default_request_reservation_tokens=0,
+                chains=[ChainConfig(name="test", providers=list(providers))],
+            ),
+            ledger=MapLedger({"openai/provider-b": 100}),
+            state=FakeState(),
+            get_provider=providers.get,
+        )
+
+        decision = await router.decide(
+            current_provider_id="provider-a",
+            window=SimpleNamespace(window_id="test-window"),
+            preferred_provider_id="openai/provider-b",
+        )
+
+        self.assertEqual(decision.selected_provider_id, "provider-a")
+        self.assertEqual(decision.candidates[0].reason, "quota_exceeded")
+
+    async def test_affinity_does_not_bypass_model_cooldown(self) -> None:
+        providers = {
+            "provider-a": make_provider("provider-a", ["text"]),
+            "provider-b": make_provider("provider-b", ["text"]),
+        }
+        state = FakeState()
+        state.provider_model_circuits["provider-b"] = {
+            "provider_id": "provider-b",
+            "provider_model": "provider-b",
+            "started_at": time.time(),
+            "retry_at": time.time() + 1_800,
+            "last_error": "HTTP 503",
+        }
+        router = ProviderQuotaRouter(
+            settings=RouterSettings(
+                chains=[ChainConfig(name="test", providers=list(providers))],
+            ),
+            ledger=MapLedger({}),
+            state=state,
+            get_provider=providers.get,
+        )
+
+        decision = await router.decide(
+            current_provider_id="provider-a",
+            window=SimpleNamespace(window_id="test-window"),
+            preferred_provider_id="provider-b",
+        )
+
+        self.assertEqual(decision.selected_provider_id, "provider-a")
+        self.assertEqual(
+            decision.candidates[0].reason,
+            "provider_error_cooldown",
+        )
+
     async def test_failed_explicit_selection_falls_back_to_global_head(self) -> None:
         providers = {
             "provider-a": make_provider("provider-a", ["text"]),

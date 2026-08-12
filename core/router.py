@@ -7,6 +7,7 @@ from typing import Any
 
 from astrbot.core.provider.provider import Provider
 
+from .affinity import RouteAffinityContext
 from .config import ChainConfig, RouterSettings, is_quota_only_exhaustion
 from .ledger import QuotaLedger, UsageRecord
 from .policies import ProviderPolicy, build_provider_policy
@@ -65,6 +66,7 @@ class RoutePlan:
     safe_fallback_provider_ids: tuple[str, ...] = ()
     selection_origin: str = "default"
     planning_elapsed_ms: float = 0.0
+    affinity: RouteAffinityContext = RouteAffinityContext()
 
 
 class ProviderQuotaRouter:
@@ -91,6 +93,7 @@ class ProviderQuotaRouter:
         window: UsageWindow,
         required_modalities: set[str] | None = None,
         explicit_provider_selection: bool = False,
+        preferred_provider_id: str | None = None,
     ) -> RouteDecision:
         """Atomically decide and reserve across every hot-reloaded router."""
         async with self.state.route_lock:
@@ -99,6 +102,7 @@ class ProviderQuotaRouter:
                 window=window,
                 required_modalities=required_modalities,
                 explicit_provider_selection=explicit_provider_selection,
+                preferred_provider_id=preferred_provider_id,
             )
             if not decision.should_reserve or self.settings.dry_run:
                 return decision
@@ -135,6 +139,7 @@ class ProviderQuotaRouter:
         window: UsageWindow,
         required_modalities: set[str] | None = None,
         explicit_provider_selection: bool = False,
+        preferred_provider_id: str | None = None,
     ) -> RouteDecision:
         chain, _ = self._find_chain(current_provider_id)
         if chain is None:
@@ -148,6 +153,7 @@ class ProviderQuotaRouter:
         provider_order = self.provider_order(
             current_provider_id=current_provider_id,
             explicit_provider_selection=explicit_provider_selection,
+            preferred_provider_id=preferred_provider_id,
         )
         states: list[CandidateState] = []
         group_circuit = (
@@ -239,6 +245,7 @@ class ProviderQuotaRouter:
         *,
         current_provider_id: str,
         explicit_provider_selection: bool = False,
+        preferred_provider_id: str | None = None,
     ) -> tuple[str, ...]:
         """Build the immutable provider order for one request."""
         chain, current_index = self._find_chain(current_provider_id)
@@ -253,9 +260,27 @@ class ProviderQuotaRouter:
                     if provider_id != current_provider_id
                 ),
             )
-        if self.settings.strict_priority_order:
-            return tuple(chain.providers)
-        return tuple(chain.providers[current_index:])
+        base_order = (
+            tuple(chain.providers)
+            if self.settings.strict_priority_order
+            else tuple(chain.providers[current_index:])
+        )
+        preferred_provider_id = str(preferred_provider_id or "").strip()
+        if not preferred_provider_id or preferred_provider_id not in chain.providers:
+            return base_order
+        return (
+            preferred_provider_id,
+            *(item for item in base_order if item != preferred_provider_id),
+        )
+
+    def provider_belongs_to_current_chain(
+        self,
+        *,
+        current_provider_id: str,
+        provider_id: str,
+    ) -> bool:
+        chain, _ = self._find_chain(current_provider_id)
+        return bool(chain and provider_id in chain.providers)
 
     async def _evaluate_candidate(
         self,

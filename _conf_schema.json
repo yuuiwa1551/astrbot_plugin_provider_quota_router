@@ -93,6 +93,18 @@
     "hint": "普通会话每次从 fallback 列表第一项检查；请求或会话明确指定 Provider 时先尊重指定模型，失败后再回到全局顺序。",
     "default": true
   },
+  "route_affinity_enabled": {
+    "description": "启用会话模型亲和",
+    "type": "bool",
+    "hint": "普通自动路由按群聊或私聊、请求模态保持最近一次成功模型；显式指定、额度、冷却、熔断和模态检查始终优先。升级默认关闭。",
+    "default": false
+  },
+  "route_affinity_ttl_seconds": {
+    "description": "会话模型亲和固定时长",
+    "type": "int",
+    "hint": "从首次成功响应起计算的固定租约，不因后续成功回复滑动续期。当前建议 3600 秒。",
+    "default": 3600
+  },
   "disable_astrbot_error_fallback": {
     "description": "接管 AstrBot 错误 fallback（兼容键）",
     "type": "bool",
@@ -252,7 +264,7 @@
   "allow_status_for_all": {
     "description": "允许所有人查看状态",
     "type": "bool",
-    "hint": "关闭后只有 admin_user_ids 可使用 /quota status。",
+    "hint": "关闭后只有 admin_user_ids 可使用 .quota status 或 。quota status。",
     "default": true
   },
   "admin_user_ids": {

@@ -45,7 +45,7 @@
 - `on_llm_request` 兜底阻断和日志补充。
 - `on_llm_response` / `on_agent_done` overlay 更新。
 - `ProviderStat` 当前窗口查询。
-- `/quota status`、`/quota reload`、`/quota reset-cache`。
+- `.quota status` / `。quota status`、`.quota reload` / `。quota reload`、`.quota reset-cache` / `。quota reset-cache`。
 - 本地状态和路由日志写入 `data/plugin_data/astrbot_plugin_provider_quota_router/`。
 
 验证：
@@ -270,7 +270,7 @@ deepseek/deepseek-v4-pro
 
 - 区分请求显式选择、UMO 显式偏好和普通默认 Provider。
 - 显式 Provider 先尝试；失败后按原全局优先级使用其他安全候选。
-- 未显式选择时继续遵循 `strict_priority_order`，不重新引入会话粘滞。
+- v0.13.0 当时未显式选择时继续遵循 `strict_priority_order`；v0.15.0 在其上增加有固定期限且受安全检查约束的会话亲和。
 - RoutePlan 固化本次候选顺序、选择来源和规划耗时。
 - 新增 `provider_error_fallback_max_candidates`，默认一条消息最多注入并尝试一个安全备用 Provider。
 
@@ -291,11 +291,25 @@ deepseek/deepseek-v4-pro
 
 目标：让管理员无需进入 WebUI，即可在当前群聊或私聊中真正删除 UMO 范围的固定对话 Provider，恢复由全局配置和 quota router 自动选路。
 
-状态：v0.14.1 已完成并部署到实时 AstrBot；容器内 115 项测试通过，字面量 `/quota unpin` 已由临时 WebChat 会话验证确实删除 UMO Provider 偏好，详见 `19期plan.md`。
+状态：已并入 v0.15.0；撤销 v0.14.1 错误加入的斜杠兼容入口，只保留 `.quota unpin` / `。quota unpin`，并同时清除当前 UMO 的自动亲和，详见 `19期plan.md`。
 
 计划交付：
 
-- 新增管理员命令 `/quota unpin`。
-- 字面量 `/quota unpin` 不依赖 `/` 是否列入 AstrBot `wake_prefix`，并保留标准唤醒前缀写法。
-- 只删除当前 UMO 的 `provider_perf_chat_completion`，不改其他会话规则、额度、冷却或熔断状态。
+- 新增管理员子命令 `<唤醒前缀>quota unpin`，当前部署使用 `.quota unpin` 或 `。quota unpin`。
+- 只服从 AstrBot `wake_prefix`，不占用 Haruki Bot 使用的 `/` 指令命名空间。
+- 删除当前 UMO 的 `provider_perf_chat_completion` 与自动亲和，不改其他会话规则、额度、冷却或熔断状态。
 - 对没有固定 Provider 的会话保持幂等，并对存储失败返回明确错误。
+
+## 20期 会话模型固定亲和
+
+目标：让每个群聊和私聊在固定 60 分钟内尽量沿用同一成功模型，减少缓存未命中和 Bot 风格突变，同时确保额度、冷却、熔断与模态安全始终优先。
+
+状态：v0.15.0 已完成并部署；133 项容器测试与静态检查通过，独立 WebChat 已验证文字亲和命中、固定期限、媒体隔离、双句号前缀 unpin、幂等清理及清理后重新选路，详见 `20期plan.md`。
+
+计划交付：
+
+- 按 UMO 哈希与标准化请求模态持久化固定时长亲和，容器重启后继续有效。
+- 普通自动路由按“亲和 Provider → 全局链”检查；显式请求或 UMO Provider 不读取也不覆盖自动亲和。
+- 只有最终成功模型建立亲和；同模型不滑动续期，fallback 成功替换亲和，并防止并发旧请求回写。
+- 亲和只影响顺序，不绕过本地日额度、reservation、安全余量、上游额度、健康冷却、Source 熔断和模态检查。
+- 日志、状态 API 与 Plugin Page 展示亲和命中、过期、绕过、Provider、模态和到期时间。

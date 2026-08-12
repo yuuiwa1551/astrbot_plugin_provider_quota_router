@@ -10,8 +10,10 @@ AstrBot provider/model 日额度路由插件。它按配置的每日 token 额�
 - 默认按 `provider_model` 作为 quota key，也支持按 `provider_id`。
 - 默认使用 AstrBot 的 `default_provider_id + fallback_chat_models` 作为路由链。
 - 默认 fallback 链直接读取 `data/cmd_config.json`；每次 LLM 请求前检查文件签名并即时热更新，另有每 5 分钟一次的后台兜底，无需重启插件。
-- 普通会话默认每次从 fallback 链首严格检查；请求 `selected_provider` 或 UMO 会话偏好明确指定 Provider 时，先使用指定模型，失败后再按全局顺序 fallback。
-- quota router 实际切换到不同 Provider 时，平台 INFO 日志会显示会话 origin、原 Provider/模型、目标 Provider/模型、动作、原模型跳过原因、目标状态、选择来源和规划耗时；普通未切换请求不刷日志。
+- 普通自动路由可按群聊/私聊与请求模态保存固定 60 分钟的最近成功模型；文字、图片、语音和图文音组合互不覆盖，到期后重新从 fallback 链首检查。
+- 会话亲和只把原模型放到候选第一位，不绕过每日额度、预占、安全余量、上游额度、模型/Source 冷却或模态判断；不可用时立即回到全局安全链并在 fallback 成功后粘住实际模型。
+- 请求 `selected_provider` 或 UMO 会话偏好明确指定 Provider 时始终优先并绕过自动亲和，失败后再按全局顺序 fallback。
+- quota router 的平台 INFO 日志会显示会话 origin、原/目标 Provider 与模型、选择来源、规划耗时以及亲和命中、过期、绕过或替换状态；完整字段同时写入决策日志。
 - 可按请求禁用 AstrBot 核心的错误 fallback，避免 403、超时等错误绕过额度判断进入后续付费模型。
 - 在 provider 选择前通过 `selected_provider` 切换到第一个可用 provider。
 - 使用 pending reservation 和短期 overlay 降低并发请求导致的超额风险。
@@ -27,7 +29,7 @@ AstrBot provider/model 日额度路由插件。它按配置的每日 token 额�
 - 每条请求保存不可变 RoutePlan；fallback 热重载只影响下一条请求，当前请求始终使用同一份链、策略和安全候选。
 - 本插件接管的任意模型最终返回 Provider 错误时，默认不在原会话展示技术错误，改为私聊 Bot 管理员；全部错误共用持久化的一小时告警窗口。
 - 支持链路耗尽后的 `stop`、`allow_paid`、`use_last` 三种行为。
-- 提供 `/quota` 管理命令。
+- 提供 `.quota` / `。quota` 管理命令，不占用 Haruki Bot 的 `/` 命令空间。
 - 提供 Plugin Page 状态面板、告警、最近路由决策和 CSV 导出。
 - 提供历史 token 用量报表：每日各模型消耗、单日模型占比、单模型每日趋势。
 
@@ -49,6 +51,8 @@ AstrBot provider/model 日额度路由插件。它按配置的每日 token 额�
 | `use_astrbot_fallback_chain` | `true` | 未配置自定义链时使用 AstrBot fallback 链 |
 | `fallback_watch_interval_seconds` | `300` | 无请求时检查 `cmd_config.json` 的兜底间隔；请求前会即时检查文件签名 |
 | `strict_priority_order` | `true` | 普通会话从链首检查；请求/UMO 明确选择优先 |
+| `route_affinity_enabled` | `false` | 是否按 UMO 与模态保持最近成功模型；本机部署显式开启 |
+| `route_affinity_ttl_seconds` | `3600` | 从首次成功响应起计算的固定租约，不滑动续期 |
 | `disable_astrbot_error_fallback` | `true` | 兼容配置键；开启后由插件接管并过滤 AstrBot 当前请求的错误 fallback |
 | `quota_cooldown_seconds` | `86400` | 受控模型达到阈值后的冷却时间 |
 | `unlimited_provider_prefixes` | `["deepseek/"]` | 兼容配置；所有非火山 Provider 均不参与本地 token 限制 |
@@ -113,17 +117,17 @@ Provider 专属调用预算示例：
 
 ## 命令
 
-- `/quota status`：查看当前窗口各 provider/model 用量。
-- `/quota unpin`：删除当前群聊或私聊的固定对话 Provider，恢复跟随全局配置和 quota router 自动选路；即使 `/` 未配置为 AstrBot 唤醒前缀也可直接使用。
-- `/quota reload`：重载插件配置。
-- `/quota reset-cache`：清理本地 pending/overlay 缓存，不删除 AstrBot 原生数据库，也不清除费用保护冷却。
-- `/quota dry-run on|off`：临时切换演练模式。
+- `.quota status` / `。quota status`：查看当前窗口各 provider/model 用量。
+- `.quota unpin` / `。quota unpin`：同时删除当前群聊或私聊的固定对话 Provider 与全部模态自动亲和，下一条消息重新按全局优先级选路。
+- `.quota reload` / `。quota reload`：重载插件配置。
+- `.quota reset-cache` / `。quota reset-cache`：清理本地 pending/overlay 缓存，不删除 AstrBot 原生数据库，也不清除费用保护冷却或会话亲和。
+- `.quota dry-run on|off` / `。quota dry-run on|off`：临时切换演练模式。
 
 `admin_user_ids` 为空时管理命令沿用 AstrBot 核心管理员权限；填写后这些 ID 作为额外管理员和错误通知目标。`allow_status_for_all=false` 时，状态查看也会限制为管理员。
 
-`/quota unpin` 只删除当前 UMO 的 `provider_perf_chat_completion`。它不会修改全局默认 Provider、单次请求由其他插件注入的 `selected_provider`、额度、冷却、熔断、会话历史或其他会话规则；没有固定 Provider 时重复执行也是安全的。
+`quota unpin` 删除当前 UMO 的 `provider_perf_chat_completion`，并清除该 UMO 的文字、图片、语音等自动亲和。它不会修改全局默认 Provider、单次请求由其他插件注入的 `selected_provider`、额度、冷却、熔断、会话历史或其他会话规则；没有固定 Provider 或亲和时重复执行也是安全的。
 
-标准的唤醒前缀写法也保留，例如唤醒前缀为 `.` 时可使用 `.quota unpin`。插件额外注册了严格匹配的 `/quota unpin` 兼容入口，避免斜杠未列入 `wake_prefix` 时被当成普通聊天。
+quota router 只服从 AstrBot 的 `wake_prefix`。当前部署使用 `.` 和 `。`，不注册任何字面量 `/quota ...` 入口。
 
 ## WebUI
 
@@ -137,7 +141,7 @@ v0.2.0 提供 AstrBot Plugin Page，不需要额外端口。
 - pending reservation 与短期 overlay 状态。
 - 火山模型的额度 cooldown、403 组级熔断与半开探测状态，以及 DeepSeek 的 unlimited 状态。
 - Provider 错误管理员告警的持久化限频状态。
-- 最近路由决策日志。
+- 最近路由决策日志，包含会话 origin、亲和状态、模态、Provider 与固定到期时间。
 - 当前窗口或指定日期 CSV 导出。
 - 最近 7/14/30/60/90 天历史图表：
   - 每天每个模型消耗堆叠柱状图。
@@ -165,7 +169,7 @@ data/plugin_data/astrbot_plugin_provider_quota_router/
   daily_snapshots/
 ```
 
-`quota_state.json` 保存 pending reservation、短期 overlay、本地 token cooldown、未知刷新上游额度 cooldown、按完整 `provider_id` 隔离的单模型健康熔断、火山 Source 熔断/探测状态，以及管理员错误告警限频时间。损坏文件会备份为 `quota_state.corrupt.*.json`，不会被一次状态查询静默覆盖。权威历史用量仍来自 AstrBot 原生 `data_v4.db` 的 `provider_stats` 表。
+`quota_state.json` 保存 pending reservation、短期 overlay、本地 token cooldown、未知刷新上游额度 cooldown、按完整 `provider_id` 隔离的单模型健康熔断、火山 Source 熔断/探测状态、按 UMO 哈希与模态隔离的固定路由亲和，以及管理员错误告警限频时间。损坏文件会备份为 `quota_state.corrupt.*.json`，不会被一次状态查询静默覆盖。权威历史用量仍来自 AstrBot 原生 `data_v4.db` 的 `provider_stats` 表。
 
 ## 设计说明
 
@@ -190,7 +194,9 @@ AstrBot 的 LLM 流程里，`on_waiting_llm_request` 在 main agent 构建和 pr
 
 默认 fallback 链在每次 LLM 请求前对 `data/cmd_config.json` 做一次轻量 `stat`；只有签名变化时才使用 `utf-8-sig` 读取 JSON 并原子替换 router，因此修改列表后的下一条消息即可看到新链。同时保留低频后台任务，默认每 300 秒在无请求时兜底检查一次。文件有其他配置变化但 fallback 内容相同时，不重建 router。
 
-`strict_priority_order=true` 时，普通会话不会沿用上次 fallback 停留位置，而是重新从链首检查。请求携带 `selected_provider`，或 AstrBot 在 UMO 范围保存了 `provider_perf_chat_completion` 时，插件会把该明确选择放到本次候选顺序第一位；它不可用时再按原全局链首到链尾检查其余 Provider。这样既不会让错误 fallback 永久粘住会话，也不会覆盖群聊或请求明确指定的模型。
+`strict_priority_order=true` 仍定义没有有效亲和时的全局顺序。`route_affinity_enabled=true` 后，普通自动路由会先检查当前 UMO 与模态的固定租约 Provider，再按去重后的全局链首到链尾检查；高优先级模型在租约内恢复不会触发主动切回，但额度、冷却、熔断和模态不支持仍会立即使亲和候选失效。租约从首次成功响应起固定计算，后续同模型成功只更新并发水位，不延长到期时间；实际 fallback 成功会为新模型建立新的固定租约。
+
+请求携带 `selected_provider`，或 AstrBot 在 UMO 范围保存了 `provider_perf_chat_completion` 时，插件会把该明确选择放到本次候选顺序第一位并完全绕过自动亲和；它不可用时再按原全局顺序检查其余 Provider。`.quota unpin` / `。quota unpin` 同时删除该显式偏好和当前 UMO 的全部模态亲和。
 
 AstrBot 自己还会在 provider 返回 403、超时或错误响应时执行一套运行中 fallback。`disable_astrbot_error_fallback=true` 是早期版本保留的兼容键；现在它不会清空后续候选，而是按本请求 RoutePlan 的顺序、额度、冷却、火山熔断和请求模态过滤后注入 runner。`provider_error_request_max_retries=1` 只限制每个 Provider 自己的调用尝试；独立的 `provider_error_fallback_max_candidates=1` 才负责把当前消息的备用 Provider 数量封顶为一个。候选按需扫描，异常抛出后按错误分类更新状态并切换，本地首响应预算首次耗尽只影响当前请求。
 
@@ -208,6 +214,7 @@ AstrBot 的最终 `role=err` 响应不会经过普通的 Agent done hook，因�
 - 如果 provider 不返回 usage，AstrBot `ProviderStat` 可能记录 0，插件会无法准确判断真实额度。
 - 如果其他 provider 路由类插件在更低 priority 后覆盖 `selected_provider`，最终 provider 可能不是本插件选择的 provider。
 - 图片分类、后台好感度等直接 Provider 调用没有 Agent runner 的 fallback 上下文；插件会让它们按首响应预算快速失败并按错误分类更新状态，但不会擅自替这些业务选择另一个模型。
+- 会话亲和只能稳定 Provider/模型选择；上游缓存是否命中仍取决于请求前缀、上下文内容、Provider 的缓存策略与缓存有效期。
 
 ## Roadmap
 
@@ -215,11 +222,18 @@ AstrBot 的最终 `role=err` 响应不会经过普通的 Agent done hook，因�
 
 ## 更新历史
 
+### v0.15.0
+
+- 新增按群聊/私聊与请求模态隔离的固定 60 分钟会话模型亲和；同模型成功不滑动续期，安全 fallback 成功后粘住实际模型。
+- 亲和仍完整服从火山每日额度、预占、安全余量、opencode 上游额度、模型/Source 冷却和模态检查。
+- 状态升级为 v8；亲和跨重启持久化，决策日志、平台日志、状态 API 和 Plugin Page 增加亲和可观测字段。
+- `.quota unpin` / `。quota unpin` 同时清除显式 Provider 与全部模态亲和，并删除会抢占 Haruki Bot 的字面量 `/quota unpin` 入口。
+
 ### v0.14.1
 
-- 新增管理员命令 `/quota unpin`，可在当前群聊或私聊中取消固定对话 Provider 并恢复自动路由。
+- 新增管理员子命令 `quota unpin`，当前使用 `.quota unpin` / `。quota unpin` 在群聊或私聊中取消固定对话 Provider 并恢复自动路由。
 - 命令仅删除当前 UMO 的 Provider 偏好；没有指定时保持幂等，存储失败时不会返回虚假成功。
-- 增加字面量 `/quota unpin` 兼容入口，不依赖部署是否把 `/` 配置为 AstrBot 唤醒前缀。
+- 曾增加字面量 `/quota unpin` 兼容入口；该设计会抢占其他 Bot 的 `/` 命令空间，已在 v0.15.0 删除。
 
 ### v0.14.0
 
@@ -336,5 +350,5 @@ AstrBot 的最终 `role=err` 响应不会经过普通的 Agent done hook，因�
 ### v0.1.0
 
 - 实现 provider/model 日额度路由 MVP。
-- 支持 AstrBot fallback 链、自定义链、pending reservation、overlay 和 `/quota` 命令。
+- 支持 AstrBot fallback 链、自定义链、pending reservation、overlay 和遵循 `wake_prefix` 的 `.quota` / `。quota` 命令。
 - 增加本地 spec、总体 plan、1 期 plan、2 期 plan 备份。

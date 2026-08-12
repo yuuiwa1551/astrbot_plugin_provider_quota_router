@@ -24,6 +24,11 @@ from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.star.filter.command import GreedyStr
 
 from .core.config import ChainConfig, RouterSettings
+from .core.affinity import (
+    RouteAffinityContext,
+    RouteAffinityService,
+    conversation_affinity_key,
+)
 from .core.error_classifier import (
     ERROR_LOCAL_ATTEMPT_TIMEOUT,
     classify_provider_error,
@@ -83,7 +88,7 @@ from .core.time_window import current_window, window_for_local_date
 
 
 PLUGIN_NAME = "astrbot_plugin_provider_quota_router"
-PLUGIN_VERSION = "0.14.1"
+PLUGIN_VERSION = "0.15.0"
 PLUGIN_REPOSITORY = "https://github.com/yuuiwa1551/astrbot_plugin_provider_quota_router"
 PLUGIN_DESCRIPTION = "按 provider/model 每日 token 额度自动降级路由 AstrBot 聊天模型。"
 HOOK_PRIORITY = 900
@@ -105,6 +110,8 @@ CONFIG_KEYS = {
     "use_astrbot_fallback_chain",
     "fallback_watch_interval_seconds",
     "strict_priority_order",
+    "route_affinity_enabled",
+    "route_affinity_ttl_seconds",
     "disable_astrbot_error_fallback",
     "quota_cooldown_seconds",
     "unlimited_provider_prefixes",
@@ -171,6 +178,11 @@ class ProviderQuotaRouterPlugin(Star):
         self.settings = self._load_settings()
         self.data_dir = self._resolve_data_dir()
         self.state = QuotaStateStore(self.data_dir)
+        self._route_affinity_service = RouteAffinityService(
+            state=self.state,
+            get_provider=self.context.get_provider_by_id,
+            get_provider_model=self._provider_model,
+        )
         self.ledger = QuotaLedger(
             self.context.get_db(),
             count_cached_input_tokens=self.settings.count_cached_input_tokens,
@@ -999,6 +1011,7 @@ class ProviderQuotaRouterPlugin(Star):
         if not self.settings.enabled:
             return
         planning_started = time.perf_counter()
+        request_started_at = time.time()
         await self._refresh_fallback_config_if_changed()
         router = self.router
         settings = router.settings
@@ -1012,12 +1025,32 @@ class ProviderQuotaRouterPlugin(Star):
         )
         required_modalities = self._required_modalities(event)
         request_id = self._request_id(event)
+        affinity = await self._prepare_route_affinity(
+            event=event,
+            selection=selection,
+            router=router,
+            settings=settings,
+            required_modalities=required_modalities,
+            request_started_at=request_started_at,
+        )
         decision = await router.decide_and_reserve(
             request_id=request_id,
             current_provider_id=current_provider_id,
             window=window,
             required_modalities=required_modalities,
             explicit_provider_selection=selection.is_explicit,
+            preferred_provider_id=(
+                affinity.provider_id
+                if affinity.status == "candidate"
+                else None
+            ),
+        )
+        affinity = self._resolve_route_affinity(
+            affinity=affinity,
+            decision=decision,
+        )
+        await self._get_route_affinity_service().discard_if_ineligible(
+            affinity
         )
         safe_fallback_ids: list[str] = []
         safe_fallback_providers: list[Any] = []
@@ -1062,6 +1095,11 @@ class ProviderQuotaRouterPlugin(Star):
         )
         payload["selection_origin"] = selection.origin
         payload["planning_elapsed_ms"] = planning_elapsed_ms
+        payload["conversation"] = str(event.unified_msg_origin or "")
+        payload["affinity_status"] = affinity.status
+        payload["affinity_provider_id"] = affinity.provider_id or None
+        payload["affinity_modality"] = affinity.modality
+        payload["affinity_expires_at"] = affinity.expires_at
         await self.state.record_decision(payload)
 
         route_plan = RoutePlan(
@@ -1074,9 +1112,15 @@ class ProviderQuotaRouterPlugin(Star):
             safe_fallback_provider_ids=tuple(safe_fallback_ids),
             selection_origin=selection.origin,
             planning_elapsed_ms=planning_elapsed_ms,
+            affinity=affinity,
         )
 
         if decision.action == "skip":
+            self._log_affinity_decision(
+                event=event,
+                affinity=affinity,
+                decision=decision,
+            )
             return
         route_plan_token = bind_provider_guard_route_plan(route_plan)
         event.set_extra(
@@ -1109,6 +1153,27 @@ class ProviderQuotaRouterPlugin(Star):
             "provider_quota_router_selected_provider_id",
             str(decision.selected_provider_id or current_provider_id),
         )
+        event.set_extra(
+            "provider_quota_router_affinity_status",
+            affinity.status,
+        )
+        event.set_extra(
+            "provider_quota_router_affinity_provider_id",
+            affinity.provider_id,
+        )
+        event.set_extra(
+            "provider_quota_router_affinity_modality",
+            affinity.modality,
+        )
+        event.set_extra(
+            "provider_quota_router_affinity_expires_at",
+            affinity.expires_at,
+        )
+        self._log_affinity_decision(
+            event=event,
+            affinity=affinity,
+            decision=decision,
+        )
 
         if decision.action == "block":
             event.set_extra("provider_quota_router_blocked", True)
@@ -1130,6 +1195,79 @@ class ProviderQuotaRouterPlugin(Star):
                     decision.action,
                     decision.reason,
                 )
+
+    async def _prepare_route_affinity(
+        self,
+        *,
+        event: AstrMessageEvent,
+        selection: ProviderSelection,
+        router: ProviderQuotaRouter,
+        settings: RouterSettings,
+        required_modalities: set[str],
+        request_started_at: float,
+    ) -> RouteAffinityContext:
+        return await self._get_route_affinity_service().prepare(
+            unified_msg_origin=str(event.unified_msg_origin or ""),
+            selection_provider_id=selection.provider_id,
+            selection_is_explicit=selection.is_explicit,
+            router=router,
+            enabled=settings.route_affinity_enabled,
+            required_modalities=required_modalities,
+            request_started_at=request_started_at,
+        )
+
+    @staticmethod
+    def _resolve_route_affinity(
+        *,
+        affinity: RouteAffinityContext,
+        decision: RouteDecision,
+    ) -> RouteAffinityContext:
+        return RouteAffinityService.resolve(
+            affinity=affinity,
+            decision=decision,
+        )
+
+    def _get_route_affinity_service(self) -> RouteAffinityService:
+        service = getattr(self, "_route_affinity_service", None)
+        if isinstance(service, RouteAffinityService):
+            return service
+        service = RouteAffinityService(
+            state=self.state,
+            get_provider=lambda provider_id: self.context.get_provider_by_id(
+                provider_id
+            ),
+            get_provider_model=self._provider_model,
+        )
+        self._route_affinity_service = service
+        return service
+
+    @staticmethod
+    def _log_affinity_decision(
+        *,
+        event: AstrMessageEvent,
+        affinity: RouteAffinityContext,
+        decision: RouteDecision,
+    ) -> None:
+        if affinity.status not in {
+            "hit",
+            "expired",
+            "ineligible",
+            "invalid_provider",
+            "provider_changed",
+            "out_of_chain",
+        }:
+            return
+        logger.info(
+            "[ProviderQuotaRouter] route affinity decision: "
+            "conversation=%s modality=%s status=%s affinity_provider=%s "
+            "selected_provider=%s expires_at=%s",
+            event.unified_msg_origin,
+            affinity.modality,
+            affinity.status,
+            affinity.provider_id or "-",
+            decision.selected_provider_id or "-",
+            affinity.expires_at,
+        )
 
     def _log_applied_route(
         self,
@@ -1171,11 +1309,33 @@ class ProviderQuotaRouterPlugin(Star):
             if callable(extra_getter)
             else 0.0
         )
+        affinity_status = (
+            str(extra_getter("provider_quota_router_affinity_status") or "disabled")
+            if callable(extra_getter)
+            else "disabled"
+        )
+        affinity_provider_id = (
+            str(extra_getter("provider_quota_router_affinity_provider_id") or "-")
+            if callable(extra_getter)
+            else "-"
+        )
+        affinity_modality_key = (
+            str(extra_getter("provider_quota_router_affinity_modality") or "text")
+            if callable(extra_getter)
+            else "text"
+        )
+        affinity_expires_at = (
+            extra_getter("provider_quota_router_affinity_expires_at")
+            if callable(extra_getter)
+            else None
+        )
         logger.info(
             "[ProviderQuotaRouter] 本次对话已由插件路由: "
             "conversation=%s from_provider=%s from_model=%s "
             "to_provider=%s to_model=%s action=%s "
-            "trigger=%s target_status=%s selection_origin=%s planning_ms=%.1f",
+            "trigger=%s target_status=%s selection_origin=%s planning_ms=%.1f "
+            "affinity_status=%s affinity_provider=%s affinity_modality=%s "
+            "affinity_expires_at=%s",
             event.unified_msg_origin,
             source_provider_id,
             source_model,
@@ -1186,6 +1346,10 @@ class ProviderQuotaRouterPlugin(Star):
             decision.reason,
             selection_origin,
             planning_elapsed_ms,
+            affinity_status,
+            affinity_provider_id,
+            affinity_modality_key,
+            affinity_expires_at,
         )
         return True
 
@@ -1284,10 +1448,11 @@ class ProviderQuotaRouterPlugin(Star):
             or event.get_extra("provider_quota_router_selected_provider_id")
             or ""
         )
+        provider_error = is_provider_error_response(response)
         if (
             selected_provider_id
             and not settings.dry_run
-            and is_provider_error_response(response)
+            and provider_error
         ):
             await self._handle_provider_error(
                 event=event,
@@ -1305,8 +1470,9 @@ class ProviderQuotaRouterPlugin(Star):
                 ),
                 overlay_tokens,
             )
+        quota_cooldown = None
         if pending and actual_is_quota_managed:
-            cooldown = await router.ensure_cooldown(
+            quota_cooldown = await router.ensure_cooldown(
                 provider_id=actual_provider_id,
                 provider_model=actual_provider_model,
                 window=current_window(
@@ -1314,16 +1480,76 @@ class ProviderQuotaRouterPlugin(Star):
                     reset_time=settings.reset_time,
                 ),
             )
-            if cooldown:
+            if quota_cooldown:
                 logger.warning(
                     "[ProviderQuotaRouter] quota cooldown active: provider=%s quota_key=%s until=%s",
                     actual_provider_id,
-                    cooldown.get("quota_key"),
+                    quota_cooldown.get("quota_key"),
                     datetime.fromtimestamp(
-                        float(cooldown.get("expires_at") or 0)
+                        float(quota_cooldown.get("expires_at") or 0)
                     ).astimezone().isoformat(timespec="seconds"),
                 )
+        if (
+            isinstance(route_plan, RoutePlan)
+            and selected_provider_id
+            and not provider_error
+            and not quota_cooldown
+        ):
+            try:
+                await self._commit_route_affinity(
+                    route_plan=route_plan,
+                    provider_id=selected_provider_id,
+                    provider_model=(
+                        actual_provider_model
+                        or self._provider_model(selected_provider_id)
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "[ProviderQuotaRouter] failed to commit route affinity: "
+                    "conversation=%s provider=%s error=%s",
+                    event.unified_msg_origin,
+                    selected_provider_id,
+                    exc,
+                    exc_info=True,
+                )
         self._clear_provider_guard_route_plan(event)
+
+    async def _commit_route_affinity(
+        self,
+        *,
+        route_plan: RoutePlan,
+        provider_id: str,
+        provider_model: str,
+    ) -> None:
+        affinity = route_plan.affinity
+        result = await self._get_route_affinity_service().commit(
+            route_plan=route_plan,
+            provider_id=provider_id,
+            provider_model=provider_model,
+        )
+        if result is None:
+            return
+        if result.status in {"created", "replaced"} and result.affinity:
+            logger.info(
+                "[ProviderQuotaRouter] route affinity %s: "
+                "modality=%s previous_provider=%s provider=%s model=%s "
+                "expires_at=%s",
+                result.status,
+                affinity.modality,
+                result.previous_provider_id or "-",
+                result.affinity.provider_id,
+                result.affinity.provider_model or "-",
+                result.affinity.expires_at,
+            )
+        elif result.status in {"stale", "cleared", "expired"}:
+            logger.info(
+                "[ProviderQuotaRouter] route affinity commit skipped: "
+                "modality=%s provider=%s status=%s",
+                affinity.modality,
+                provider_id,
+                result.status,
+            )
 
     async def _handle_provider_error(
         self,
@@ -1555,7 +1781,9 @@ class ProviderQuotaRouterPlugin(Star):
         if subcommand == "dry-run" and len(parts) >= 2:
             value = parts[1].lower()
             if value not in {"on", "off"}:
-                yield event.plain_result("用法：/quota dry-run on|off")
+                yield event.plain_result(
+                    "用法：.quota dry-run on|off 或 。quota dry-run on|off"
+                )
                 return
             self.settings = replace(self.settings, dry_run=value == "on")
             self.router = self._build_router()
@@ -1565,18 +1793,9 @@ class ProviderQuotaRouterPlugin(Star):
             return
 
         yield event.plain_result(
-            "用法：/quota status | /quota unpin | /quota reload | "
-            "/quota reset-cache | /quota dry-run on|off"
+            "用法：.quota status | .quota unpin | .quota reload | "
+            ".quota reset-cache | .quota dry-run on|off；中文句号前缀同样可用。"
         )
-
-    @filter.regex(r"(?i)^/quota\s+unpin\s*$")
-    async def quota_unpin_slash_command(self, event: AstrMessageEvent):
-        """兼容未把斜杠配置为 wake_prefix 的部署。"""
-        if not self._is_admin(event):
-            yield event.plain_result("没有权限执行 quota 管理命令。")
-        else:
-            yield event.plain_result(await self._unpin_provider_preference(event))
-        event.stop_event()
 
     async def api_get_status(self) -> dict:
         try:
@@ -1703,6 +1922,12 @@ class ProviderQuotaRouterPlugin(Star):
         rows = await self.router.status(window=window)
         alerts = build_alerts(rows)
         state = await self.state.snapshot()
+        affinity_buckets = state.get("route_affinities", {}) or {}
+        route_affinity_count = sum(
+            len(bucket)
+            for bucket in affinity_buckets.values()
+            if isinstance(bucket, dict)
+        )
         return {
             "settings": self._settings_payload(),
             "window": {
@@ -1734,6 +1959,7 @@ class ProviderQuotaRouterPlugin(Star):
                 "provider_group_circuit_count": len(
                     state.get("provider_group_circuits", {}) or {}
                 ),
+                "route_affinity_count": route_affinity_count,
                 "pending": list((state.get("pending", {}) or {}).values()),
                 "overlays": state.get("overlays", []) or [],
                 "cooldowns": list((state.get("cooldowns", {}) or {}).values()),
@@ -1770,6 +1996,8 @@ class ProviderQuotaRouterPlugin(Star):
             "use_astrbot_fallback_chain": self.settings.use_astrbot_fallback_chain,
             "fallback_watch_interval_seconds": self.settings.fallback_watch_interval_seconds,
             "strict_priority_order": self.settings.strict_priority_order,
+            "route_affinity_enabled": self.settings.route_affinity_enabled,
+            "route_affinity_ttl_seconds": self.settings.route_affinity_ttl_seconds,
             "disable_astrbot_error_fallback": self.settings.disable_astrbot_error_fallback,
             "quota_cooldown_seconds": self.settings.quota_cooldown_seconds,
             "unlimited_provider_prefixes": list(
@@ -1916,6 +2144,10 @@ class ProviderQuotaRouterPlugin(Star):
         if not umo:
             return "无法识别当前会话，未修改对话 Provider 指定。"
 
+        previous = None
+        preference_error: Exception | None = None
+        affinity_error: Exception | None = None
+        affinity_count = 0
         try:
             previous = await sp.session_get(
                 umo,
@@ -1924,6 +2156,7 @@ class ProviderQuotaRouterPlugin(Star):
             )
             await sp.session_remove(umo, SESSION_PROVIDER_PREFERENCE_KEY)
         except Exception as exc:  # noqa: BLE001
+            preference_error = exc
             logger.error(
                 "[ProviderQuotaRouter] failed to clear UMO provider preference: "
                 "origin=%s error=%s",
@@ -1931,27 +2164,52 @@ class ProviderQuotaRouterPlugin(Star):
                 exc,
                 exc_info=True,
             )
-            return "取消当前会话的固定对话 Provider 失败，请查看平台日志。"
+        try:
+            affinity_count = await self.state.clear_route_affinities(
+                conversation_key=conversation_affinity_key(umo),
+            )
+        except Exception as exc:  # noqa: BLE001
+            affinity_error = exc
+            logger.error(
+                "[ProviderQuotaRouter] failed to clear route affinities: "
+                "origin=%s error=%s",
+                umo,
+                exc,
+                exc_info=True,
+            )
+
+        if preference_error or affinity_error:
+            return (
+                "清理当前会话的固定对话 Provider 或自动路由亲和失败，"
+                "请查看平台日志。"
+            )
 
         previous_id = previous.strip() if isinstance(previous, str) else ""
-        if not previous_id:
+        if not previous_id and affinity_count == 0:
             logger.info(
-                "[ProviderQuotaRouter] UMO provider preference already absent: "
+                "[ProviderQuotaRouter] UMO provider preference and route affinity "
+                "already absent: "
                 "origin=%s",
                 umo,
             )
-            return "当前会话没有固定对话 Provider，已经在跟随全局配置。"
+            return (
+                "当前会话没有固定对话 Provider 或自动路由亲和，"
+                "已经在跟随全局配置。"
+            )
 
         logger.info(
-            "[ProviderQuotaRouter] UMO provider preference cleared: "
-            "origin=%s previous=%s",
+            "[ProviderQuotaRouter] UMO provider preference and route affinity "
+            "cleared: origin=%s previous=%s affinity_count=%s",
             umo,
-            previous_id,
+            previous_id or "-",
+            affinity_count,
         )
-        return (
-            f"已取消当前会话的固定对话 Provider：{previous_id}。"
-            "下一条消息起跟随全局配置，由 quota router 自动选路。"
-        )
+        details: list[str] = []
+        if previous_id:
+            details.append(f"固定对话 Provider：{previous_id}")
+        if affinity_count:
+            details.append(f"{affinity_count} 个模态的自动路由亲和")
+        return "已清除" + "，以及".join(details) + "。下一条消息起重新按全局优先级选路。"
 
     def _current_provider_id(self, event: AstrMessageEvent) -> str:
         selected = event.get_extra("selected_provider")

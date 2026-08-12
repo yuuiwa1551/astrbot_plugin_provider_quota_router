@@ -1,6 +1,6 @@
 # AstrBot Provider Quota Router Spec
 
-## v0.12.2 当前契约
+## v0.15.0 当前契约
 
 - 独立源码仓库：`D:\astrbot\tmp_provider_quota_router_repo`；实时 Docker 数据根：`D:\astrbot\data -> /AstrBot/data`。不得把 `C:\Users\Administrator\astrbot` 当作当前运行目录。
 - 只有 `provider_source_id=openai` 命中的火山开发者计划使用本地日 token 保护；`volcengine-agent-plan/*`、中转站、DeepSeek 和其他 Token Plan 不参与该阈值。
@@ -10,9 +10,12 @@
 - 只有火山开发者计划明确账号级错误才允许打开 Source 熔断；普通请求级 403 不连坐整个 Source。
 - `provider_model` 额度查询必须同时限定到本地额度策略命中的 Provider ID，禁止把付费 Token Plan 的同名模型计入免费计划。
 - 每条请求使用不可变 RoutePlan；额度判断与 reservation 在 StateStore 共享临界区内原子完成，热重载产生的新旧 router 也不能并发双放行。
+- `route_affinity_enabled=true` 时，普通自动路由按 UMO 哈希与标准化请求模态读取固定租约；有效亲和 Provider 只被移到候选首位，仍必须通过额度、reservation、安全余量、上游额度、模型/Source 冷却和模态检查。
+- 亲和租约从最终成功响应起固定计算 `route_affinity_ttl_seconds`，同模型成功不滑动续期；安全 fallback 成功后由实际 Provider 替换，旧慢请求与 unpin 前的在途请求不得回写覆盖。
+- 请求级 `selected_provider` 和 UMO `provider_perf_chat_completion` 为显式选择，完全绕过自动亲和；`.quota unpin` / `。quota unpin` 同时清理显式偏好与当前 UMO 的所有模态亲和。
 - 只有插件实际执行 `switch/use_last` 且目标 Provider 与原 Provider 不同时，才输出“本次对话已由插件路由”INFO 日志；必须包含 conversation origin、原 Provider/模型、目标 Provider/模型、动作、原模型跳过原因 `trigger` 和目标状态 `target_status`。普通放行和同 Provider `use_last` 不输出，dry-run 不得冒充真实切换。
 - `allow_paid/use_last` 只能绕过火山本地额度，不能绕过缺失、模态、模型健康、Source 熔断或上游硬额度。
-- 下文保留最初 MVP 的背景和演进依据；凡与本节冲突，以本节、`14期plan.md`、`15期plan.md` 和 `16期plan.md` 为准。
+- 下文保留最初 MVP 的背景和演进依据；凡与本节冲突，以本节及最新阶段计划为准。
 
 ## 背景
 
@@ -107,6 +110,8 @@
   "count_cached_input_tokens": true,
   "quota_key_mode": "provider_model",
   "exhausted_action": "stop",
+  "route_affinity_enabled": false,
+  "route_affinity_ttl_seconds": 3600,
   "chains": [
     {
       "name": "doubao-main",
@@ -189,11 +194,11 @@ data/plugin_data/astrbot_plugin_provider_quota_router/
 
 ## 管理命令
 
-- `/quota status`：显示所有链路 provider 当日用量和状态。
-- `/quota status <provider_id|model>`：显示单个 provider/model。
-- `/quota reload`：重新读取配置。
-- `/quota reset-cache`：清理插件本地 overlay/reservation，不删除 AstrBot 原生 DB。
-- `/quota dry-run on|off`：临时切换 dry-run。
+- `.quota status` / `。quota status`：显示所有链路 provider 当日用量和状态。
+- `.quota unpin` / `。quota unpin`：清理当前 UMO 的显式 Provider 与全部模态亲和。
+- `.quota reload` / `。quota reload`：重新读取配置。
+- `.quota reset-cache` / `。quota reset-cache`：清理插件本地 overlay/reservation，不删除 AstrBot 原生 DB、费用冷却或亲和。
+- `.quota dry-run on|off` / `。quota dry-run on|off`：临时切换 dry-run。
 
 命令仅允许管理员或 AstrBot owner 使用。
 

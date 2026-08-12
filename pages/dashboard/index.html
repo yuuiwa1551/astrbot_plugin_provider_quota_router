@@ -719,12 +719,14 @@
           <table>
             <thead>
               <tr>
-                <th style="width: 18%">Time</th>
-                <th style="width: 10%">Action</th>
-                <th style="width: 18%">Original</th>
-                <th style="width: 18%">Selected</th>
-                <th style="width: 16%">Quota Key</th>
-                <th style="width: 20%">Reason</th>
+                <th>Time</th>
+                <th>Conversation</th>
+                <th>Action</th>
+                <th>Original</th>
+                <th>Selected</th>
+                <th>Affinity</th>
+                <th>Quota Key</th>
+                <th>Reason</th>
               </tr>
             </thead>
             <tbody id="decisionBody"></tbody>
@@ -781,6 +783,12 @@
         const d = new Date(value);
         if (Number.isNaN(d.getTime())) return value;
         return d.toLocaleString("zh-CN", { hour12: false });
+      }
+
+      function formatEpochSeconds(value) {
+        const seconds = Number(value);
+        if (!Number.isFinite(seconds) || seconds <= 0) return "-";
+        return new Date(seconds * 1000).toLocaleString("zh-CN", { hour12: false });
       }
 
       function setBusy(isBusy) {
@@ -963,6 +971,7 @@
           `upstream quota cooldown: ${runtime.upstream_quota_cooldown_count || 0}`,
           `provider model circuit: ${runtime.provider_model_circuit_count || 0}`,
           `provider group circuit: ${runtime.provider_group_circuit_count || 0}`,
+          `route affinity: ${runtime.route_affinity_count || 0}`,
           `admin alert throttle: ${runtime.notification_throttle_count || 0}`,
         ];
         if (pending[0]) {
@@ -1016,18 +1025,28 @@
       function renderDecisions(decisions) {
         els.decisionEmpty.hidden = decisions.length > 0;
         els.decisionBody.innerHTML = decisions
-          .map(
-            (item) => `
+          .map((item) => {
+            const affinity = [
+              item.affinity_status || "-",
+              item.affinity_modality || "text",
+              item.affinity_provider_id || "",
+            ].filter(Boolean).join(" · ");
+            const affinityExpiry = item.affinity_expires_at
+              ? ` until ${formatEpochSeconds(item.affinity_expires_at)}`
+              : "";
+            return `
               <tr>
                 <td>${escapeHtml(formatDateTime(item.time))}</td>
+                <td>${escapeHtml(item.conversation || "-")}</td>
                 <td><span class="badge notice">${escapeHtml(item.action || "-")}</span></td>
                 <td>${escapeHtml(item.original_provider_id || "-")}</td>
                 <td>${escapeHtml(item.selected_provider_id || "-")}</td>
+                <td>${escapeHtml(affinity + affinityExpiry)}</td>
                 <td>${escapeHtml(item.selected_quota_key || "-")}</td>
                 <td>${escapeHtml(item.reason || "-")}</td>
               </tr>
-            `,
-          )
+            `;
+          })
           .join("");
       }
 

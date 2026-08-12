@@ -57,6 +57,8 @@ class RouterSettings:
     use_astrbot_fallback_chain: bool = True
     fallback_watch_interval_seconds: int = 300
     strict_priority_order: bool = True
+    route_affinity_enabled: bool = False
+    route_affinity_ttl_seconds: int = 3_600
     disable_astrbot_error_fallback: bool = True
     quota_cooldown_seconds: int = 86_400
     unlimited_provider_prefixes: tuple[str, ...] = ("deepseek/",)
@@ -121,6 +123,11 @@ class RouterSettings:
                 1, _positive_int(raw.get("fallback_watch_interval_seconds"), 300)
             ),
             strict_priority_order=bool(raw.get("strict_priority_order", True)),
+            route_affinity_enabled=bool(raw.get("route_affinity_enabled", False)),
+            route_affinity_ttl_seconds=max(
+                60,
+                _positive_int(raw.get("route_affinity_ttl_seconds"), 3_600),
+            ),
             disable_astrbot_error_fallback=bool(
                 raw.get("disable_astrbot_error_fallback", True)
             ),

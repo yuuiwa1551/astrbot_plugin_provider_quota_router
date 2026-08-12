@@ -26,6 +26,8 @@ class RouterSettingsTests(unittest.TestCase):
             300,
         )
         self.assertEqual(settings.provider_policy_overrides, ())
+        self.assertFalse(settings.route_affinity_enabled)
+        self.assertEqual(settings.route_affinity_ttl_seconds, 3_600)
 
     def test_provider_error_cooldown_can_be_configured(self) -> None:
         settings = RouterSettings.from_raw(
@@ -56,6 +58,17 @@ class RouterSettingsTests(unittest.TestCase):
             settings.provider_attempt_timeout_cooldown_seconds,
             120,
         )
+
+    def test_route_affinity_can_be_enabled_with_minimum_ttl(self) -> None:
+        settings = RouterSettings.from_raw(
+            {
+                "route_affinity_enabled": True,
+                "route_affinity_ttl_seconds": 1,
+            }
+        )
+
+        self.assertTrue(settings.route_affinity_enabled)
+        self.assertEqual(settings.route_affinity_ttl_seconds, 60)
 
     def test_explicit_zero_chain_limit_is_not_replaced_by_default(self) -> None:
         chain = ChainConfig(name="disabled", providers=["provider"], daily_limit_tokens=0)

@@ -28,6 +28,10 @@ class MainRouteLoggingTests(unittest.TestCase):
         extras = {
             "provider_quota_router_selection_origin": "umo",
             "provider_quota_router_planning_elapsed_ms": 12.345,
+            "provider_quota_router_affinity_status": "explicit_bypass",
+            "provider_quota_router_affinity_provider_id": "",
+            "provider_quota_router_affinity_modality": "text",
+            "provider_quota_router_affinity_expires_at": None,
         }
         event = SimpleNamespace(
             unified_msg_origin="aiocqhttp:GroupMessage:123456",
@@ -72,6 +76,10 @@ class MainRouteLoggingTests(unittest.TestCase):
             "upstream_quota",
             "umo",
             12.345,
+            "explicit_bypass",
+            "-",
+            "text",
+            None,
         ))
 
     def test_non_route_decision_does_not_emit_applied_route_log(self) -> None:
