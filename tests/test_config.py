@@ -13,6 +13,7 @@ class RouterSettingsTests(unittest.TestCase):
         self.assertEqual(settings.provider_error_cooldown_seconds, 1_800)
         self.assertEqual(settings.provider_error_request_max_retries, 1)
         self.assertEqual(settings.provider_error_fallback_max_candidates, 1)
+        self.assertEqual(settings.provider_error_full_call_timeout_seconds, 20)
         self.assertEqual(
             settings.provider_attempt_timeout_failure_threshold,
             2,
@@ -28,6 +29,8 @@ class RouterSettingsTests(unittest.TestCase):
         self.assertEqual(settings.provider_policy_overrides, ())
         self.assertFalse(settings.route_affinity_enabled)
         self.assertEqual(settings.route_affinity_ttl_seconds, 3_600)
+        self.assertFalse(settings.route_direct_provider_calls_enabled)
+        self.assertEqual(settings.direct_provider_fallback_max_candidates, 1)
 
     def test_provider_error_cooldown_can_be_configured(self) -> None:
         settings = RouterSettings.from_raw(
@@ -36,6 +39,9 @@ class RouterSettingsTests(unittest.TestCase):
                 "provider_error_cooldown_seconds": 900,
                 "provider_error_request_max_retries": 2,
                 "provider_error_fallback_max_candidates": 0,
+                "provider_error_full_call_timeout_seconds": 30,
+                "route_direct_provider_calls_enabled": True,
+                "direct_provider_fallback_max_candidates": 2,
                 "provider_attempt_timeout_failure_threshold": 3,
                 "provider_attempt_timeout_failure_window_seconds": 600,
                 "provider_attempt_timeout_cooldown_seconds": 120,
@@ -46,6 +52,9 @@ class RouterSettingsTests(unittest.TestCase):
         self.assertEqual(settings.provider_error_cooldown_seconds, 900)
         self.assertEqual(settings.provider_error_request_max_retries, 2)
         self.assertEqual(settings.provider_error_fallback_max_candidates, 0)
+        self.assertEqual(settings.provider_error_full_call_timeout_seconds, 30)
+        self.assertTrue(settings.route_direct_provider_calls_enabled)
+        self.assertEqual(settings.direct_provider_fallback_max_candidates, 2)
         self.assertEqual(
             settings.provider_attempt_timeout_failure_threshold,
             3,
@@ -85,6 +94,7 @@ class RouterSettingsTests(unittest.TestCase):
                   {
                     "provider_id": "volcengine-agent-plan/doubao-seed-2.0-mini",
                     "first_response_timeout_seconds": 3,
+                    "full_call_timeout_seconds": 12,
                     "request_max_retries": 1,
                     "max_output_tokens": 220
                   }
@@ -99,6 +109,7 @@ class RouterSettingsTests(unittest.TestCase):
         self.assertIsNotNone(override)
         assert override is not None
         self.assertEqual(override.first_response_timeout_seconds, 3)
+        self.assertEqual(override.full_call_timeout_seconds, 12)
         self.assertEqual(override.request_max_retries, 1)
         self.assertEqual(override.max_output_tokens, 220)
         self.assertIsNone(settings.provider_policy_override("another/provider"))
@@ -110,6 +121,7 @@ class RouterSettingsTests(unittest.TestCase):
                     "provider/model": {
                         "provider_id": "ignored/provider",
                         "first_response_timeout_seconds": -3,
+                        "full_call_timeout_seconds": -2,
                         "request_max_retries": 0,
                         "max_output_tokens": -1,
                     }
@@ -121,6 +133,7 @@ class RouterSettingsTests(unittest.TestCase):
         self.assertIsNotNone(override)
         assert override is not None
         self.assertEqual(override.first_response_timeout_seconds, 0)
+        self.assertEqual(override.full_call_timeout_seconds, 0)
         self.assertEqual(override.request_max_retries, 1)
         self.assertEqual(override.max_output_tokens, 0)
         self.assertIsNone(

@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.16.0
+
+- 新增 `route_direct_provider_calls_enabled`，统一接管插件经 AstrBot Chat Provider 发出的 `llm_generate`、`tool_loop_agent`、`text_chat` 与 `text_chat_stream` 调用；升级默认关闭，本机显式开启。
+- 新增不可变 `DirectRoutePlan`，按“请求 Provider → 实时全局链”执行额度、冷却、Source 熔断、可用性和模态检查；同次实际故障默认最多再试一个安全模型，不读写会话亲和。
+- 流式仅允许在首块输出前 fallback；内容审核、上下文和一般 400/422 不跨模型重试，明确能力不支持、瞬态故障与已冷却状态允许切换。
+- 将流式 `first_response_timeout_seconds` 与非流式 `full_call_timeout_seconds` 拆开，避免辅助 Mini 的 3 秒首块策略误杀完整非流式生成；两类本地预算继续使用连续阈值短冷却。
+- 动态保护已加载的内置和第三方 Chat Provider 具体类，普通 RoutePlan、内部探测与直调 fallback 防递归；父子 Provider guard 对同一实例只执行一次。
+- 决策日志和 Plugin Page 增加路由类型、调用插件、请求/实际 Provider、尝试状态及耗时；平台日志只在直调实际换模型时输出明确记录。
+- 新增冷却零外呼、同次 fallback、流式边界、模态、取消、嵌套插件调用、父子 Provider、超时拆分和 reservation 归因回归测试。
+- 版本统一为 0.16.0。
+
 ## v0.15.0
 
 - 新增按 UMO 与请求模态隔离的固定 60 分钟路由亲和；普通自动路由优先沿用最近成功模型，文字、图片、语音与图文音组合互不覆盖。

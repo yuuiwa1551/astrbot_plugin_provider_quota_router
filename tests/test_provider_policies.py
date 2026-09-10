@@ -29,11 +29,13 @@ class ProviderPolicyTests(unittest.TestCase):
         settings = RouterSettings.from_raw(
             {
                 "provider_error_attempt_timeout_seconds": 20,
+                "provider_error_full_call_timeout_seconds": 30,
                 "provider_error_request_max_retries": 3,
                 "provider_policy_overrides": [
                     {
                         "provider_id": provider_id,
                         "first_response_timeout_seconds": 3,
+                        "full_call_timeout_seconds": 12,
                         "request_max_retries": 1,
                         "max_output_tokens": 220,
                     }
@@ -47,6 +49,7 @@ class ProviderPolicyTests(unittest.TestCase):
         )
 
         self.assertEqual(policy.first_response_timeout_seconds, 3)
+        self.assertEqual(policy.full_call_timeout_seconds, 12)
         self.assertEqual(policy.request_max_retries, 1)
         self.assertEqual(policy.max_output_tokens, 220)
         self.assertTrue(policy.manages_local_quota)
@@ -55,6 +58,7 @@ class ProviderPolicyTests(unittest.TestCase):
         settings = RouterSettings.from_raw(
             {
                 "provider_error_attempt_timeout_seconds": 20,
+                "provider_error_full_call_timeout_seconds": 30,
                 "provider_error_request_max_retries": 3,
                 "provider_policy_overrides": [
                     {
@@ -73,6 +77,7 @@ class ProviderPolicyTests(unittest.TestCase):
         )
 
         self.assertEqual(policy.first_response_timeout_seconds, 20)
+        self.assertEqual(policy.full_call_timeout_seconds, 30)
         self.assertEqual(policy.request_max_retries, 3)
         self.assertIsNone(policy.max_output_tokens)
 
@@ -83,6 +88,7 @@ class ProviderPolicyTests(unittest.TestCase):
                     {
                         "provider_id": "provider/model",
                         "first_response_timeout_seconds": 0,
+                        "full_call_timeout_seconds": 0,
                         "max_output_tokens": 0,
                     }
                 ]
@@ -95,6 +101,7 @@ class ProviderPolicyTests(unittest.TestCase):
         )
 
         self.assertEqual(policy.first_response_timeout_seconds, 0)
+        self.assertEqual(policy.full_call_timeout_seconds, 0)
         self.assertIsNone(policy.max_output_tokens)
 
 

@@ -109,7 +109,17 @@ _GUARD_STATE_ERROR_NAMES = {
 
 _LOCAL_ATTEMPT_TIMEOUT_MARKERS = (
     "providerattempttimeouterror",
+    "providerfullcalltimeouterror",
     "first response timed out after",
+    "full call timed out after",
+)
+
+_DIRECT_CAPABILITY_FALLBACK_MARKERS = (
+    "the model is not a vlm",
+    "function calling is not enabled",
+    "tool is not supported",
+    "tools are not supported",
+    "modality_not_supported",
 )
 
 
@@ -131,7 +141,10 @@ def classify_provider_error(
             reason="existing_cooldown_guard",
         )
 
-    if error_name == "ProviderAttemptTimeoutError" or any(
+    if error_name in {
+        "ProviderAttemptTimeoutError",
+        "ProviderFullCallTimeoutError",
+    } or any(
         marker in normalized for marker in _LOCAL_ATTEMPT_TIMEOUT_MARKERS
     ):
         return ErrorDisposition(
@@ -190,6 +203,23 @@ def classify_provider_error(
         should_fallback=True,
         cooldown_seconds=policy.unknown_error_cooldown_seconds,
         reason="provider_unknown_error",
+    )
+
+
+def should_fallback_direct(
+    *,
+    error: Exception | str,
+    disposition: ErrorDisposition,
+) -> bool:
+    """Use a stricter fallback boundary for background plugin calls."""
+    if not disposition.should_fallback:
+        return False
+    if disposition.kind != ERROR_REQUEST:
+        return True
+    normalized = _error_text(error).casefold()
+    return any(
+        marker in normalized
+        for marker in _DIRECT_CAPABILITY_FALLBACK_MARKERS
     )
 
 

@@ -720,6 +720,8 @@
             <thead>
               <tr>
                 <th>Time</th>
+                <th>Type</th>
+                <th>Caller</th>
                 <th>Conversation</th>
                 <th>Action</th>
                 <th>Original</th>
@@ -1037,6 +1039,8 @@
             return `
               <tr>
                 <td>${escapeHtml(formatDateTime(item.time))}</td>
+                <td>${escapeHtml(item.route_kind || "conversation")}</td>
+                <td>${escapeHtml(item.caller_plugin || "-")}</td>
                 <td>${escapeHtml(item.conversation || "-")}</td>
                 <td><span class="badge notice">${escapeHtml(item.action || "-")}</span></td>
                 <td>${escapeHtml(item.original_provider_id || "-")}</td>

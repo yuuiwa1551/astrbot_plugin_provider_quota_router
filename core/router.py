@@ -104,33 +104,163 @@ class ProviderQuotaRouter:
                 explicit_provider_selection=explicit_provider_selection,
                 preferred_provider_id=preferred_provider_id,
             )
-            if not decision.should_reserve or self.settings.dry_run:
-                return decision
-            selected_provider_id = str(
-                decision.selected_provider_id or current_provider_id
-            )
-            selected_state = next(
-                (
-                    candidate
-                    for candidate in decision.candidates
-                    if candidate.provider_id == selected_provider_id
-                ),
-                None,
-            )
-            await self.state.reserve(
+            await self._reserve_decision(
                 request_id=request_id,
-                window_id=window.window_id,
-                quota_key=str(decision.selected_quota_key),
-                provider_id=selected_provider_id,
-                provider_model=(
-                    selected_state.provider_model
-                    if selected_state
-                    else ""
-                ),
-                tokens=decision.reservation_tokens,
-                ttl_seconds=self.settings.reservation_ttl_seconds,
+                window=window,
+                decision=decision,
+                fallback_provider_id=current_provider_id,
             )
             return decision
+
+    async def decide_order_and_reserve(
+        self,
+        *,
+        request_id: str,
+        current_provider_id: str,
+        provider_order: tuple[str, ...],
+        window: UsageWindow,
+        required_modalities: set[str] | None = None,
+    ) -> RouteDecision:
+        """Atomically select from a request-scoped direct-call chain."""
+        async with self.state.route_lock:
+            decision = await self.decide_order(
+                current_provider_id=current_provider_id,
+                provider_order=provider_order,
+                window=window,
+                required_modalities=required_modalities,
+            )
+            await self._reserve_decision(
+                request_id=request_id,
+                window=window,
+                decision=decision,
+                fallback_provider_id=current_provider_id,
+            )
+            return decision
+
+    async def _reserve_decision(
+        self,
+        *,
+        request_id: str,
+        window: UsageWindow,
+        decision: RouteDecision,
+        fallback_provider_id: str,
+    ) -> None:
+        if not decision.should_reserve or self.settings.dry_run:
+            return
+        selected_provider_id = str(
+            decision.selected_provider_id or fallback_provider_id
+        )
+        selected_state = next(
+            (
+                candidate
+                for candidate in decision.candidates
+                if candidate.provider_id == selected_provider_id
+            ),
+            None,
+        )
+        await self.state.reserve(
+            request_id=request_id,
+            window_id=window.window_id,
+            quota_key=str(decision.selected_quota_key),
+            provider_id=selected_provider_id,
+            provider_model=(selected_state.provider_model if selected_state else ""),
+            tokens=decision.reservation_tokens,
+            ttl_seconds=self.settings.reservation_ttl_seconds,
+        )
+
+    async def decide_order(
+        self,
+        *,
+        current_provider_id: str,
+        provider_order: tuple[str, ...],
+        window: UsageWindow,
+        required_modalities: set[str] | None = None,
+    ) -> RouteDecision:
+        """Evaluate an immutable request-local order without changing global chains."""
+        provider_order = tuple(
+            dict.fromkeys(str(item).strip() for item in provider_order if str(item).strip())
+        )
+        if not provider_order:
+            return RouteDecision(
+                action="block",
+                reason="direct_chain_empty",
+                original_provider_id=current_provider_id,
+            )
+        base_chain, _ = self._find_chain(current_provider_id)
+        if base_chain is None:
+            base_chain = next(
+                (
+                    chain
+                    for chain in self.settings.chains
+                    if any(item in chain.providers for item in provider_order)
+                ),
+                self.settings.chains[0] if self.settings.chains else None,
+            )
+        chain = ChainConfig(
+            name=(
+                f"{base_chain.name}:plugin-direct"
+                if base_chain is not None
+                else "plugin-direct"
+            ),
+            providers=list(provider_order),
+            daily_limit_tokens=(
+                base_chain.daily_limit_tokens if base_chain is not None else None
+            ),
+            safety_buffer_tokens=(
+                base_chain.safety_buffer_tokens if base_chain is not None else None
+            ),
+            request_reservation_tokens=(
+                base_chain.request_reservation_tokens
+                if base_chain is not None
+                else None
+            ),
+        )
+        required_modalities = required_modalities or set()
+        states: list[CandidateState] = []
+        group_circuit = (
+            await self.state.get_provider_group_circuit(group_id=VOLCENGINE_GROUP_ID)
+            if self.settings.volcengine_403_circuit_enabled
+            else None
+        )
+        for provider_id in provider_order:
+            state = await self._evaluate_candidate(
+                provider_id=provider_id,
+                chain=chain,
+                window=window,
+                required_modalities=required_modalities,
+                group_circuit=group_circuit,
+            )
+            states.append(state)
+            if state.available:
+                return RouteDecision(
+                    action=(
+                        "allow"
+                        if provider_id == current_provider_id
+                        else "switch"
+                    ),
+                    reason=state.reason,
+                    chain_name=chain.name,
+                    original_provider_id=current_provider_id,
+                    selected_provider_id=provider_id,
+                    selected_quota_key=(
+                        state.quota_key if state.quota_managed else None
+                    ),
+                    reservation_tokens=state.reservation_tokens,
+                    candidates=tuple(states),
+                    provider_order=provider_order,
+                )
+        return RouteDecision(
+            action="block",
+            reason=(
+                "chain_exhausted"
+                if is_quota_only_exhaustion([item.reason for item in states])
+                else "chain_unavailable"
+            ),
+            chain_name=chain.name,
+            original_provider_id=current_provider_id,
+            candidates=tuple(states),
+            provider_order=provider_order,
+        )
 
     async def decide(
         self,
@@ -723,7 +853,11 @@ class ProviderQuotaRouter:
             return None
         chain, _ = self._find_chain(provider_id)
         if chain is None:
-            return None
+            chain = (
+                self.settings.chains[0]
+                if self.settings.chains
+                else ChainConfig(name="direct-default", providers=[provider_id])
+            )
         quota_key = self._quota_key(provider_id, provider_model)
         usage = await self._usage(quota_key, window, provider_id)
         projected = (

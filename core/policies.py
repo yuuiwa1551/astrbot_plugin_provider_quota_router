@@ -20,6 +20,7 @@ class ProviderPolicy:
     health_cooldown_seconds: int
     unknown_error_cooldown_seconds: int
     first_response_timeout_seconds: int
+    full_call_timeout_seconds: int = 0
     request_max_retries: int = 1
     max_output_tokens: int | None = None
 
@@ -55,6 +56,11 @@ def build_provider_policy(*, provider: Any, settings: Any) -> ProviderPolicy:
         if override and override.first_response_timeout_seconds is not None
         else settings.provider_error_attempt_timeout_seconds
     )
+    full_call_timeout_seconds = (
+        override.full_call_timeout_seconds
+        if override and override.full_call_timeout_seconds is not None
+        else settings.provider_error_full_call_timeout_seconds
+    )
     request_max_retries = (
         override.request_max_retries
         if override and override.request_max_retries is not None
@@ -87,6 +93,7 @@ def build_provider_policy(*, provider: Any, settings: Any) -> ProviderPolicy:
         first_response_timeout_seconds=max(
             0, int(first_response_timeout_seconds)
         ),
+        full_call_timeout_seconds=max(0, int(full_call_timeout_seconds)),
         request_max_retries=max(1, int(request_max_retries)),
         max_output_tokens=(
             max(1, int(max_output_tokens))

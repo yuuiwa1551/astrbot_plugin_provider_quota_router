@@ -36,6 +36,7 @@ class ChainConfig:
 class ProviderPolicyOverride:
     provider_id: str
     first_response_timeout_seconds: int | None = None
+    full_call_timeout_seconds: int | None = None
     request_max_retries: int | None = None
     max_output_tokens: int | None = None
 
@@ -59,6 +60,8 @@ class RouterSettings:
     strict_priority_order: bool = True
     route_affinity_enabled: bool = False
     route_affinity_ttl_seconds: int = 3_600
+    route_direct_provider_calls_enabled: bool = False
+    direct_provider_fallback_max_candidates: int = 1
     disable_astrbot_error_fallback: bool = True
     quota_cooldown_seconds: int = 86_400
     unlimited_provider_prefixes: tuple[str, ...] = ("deepseek/",)
@@ -74,6 +77,7 @@ class RouterSettings:
     provider_error_request_max_retries: int = 1
     provider_error_fallback_max_candidates: int = 1
     provider_error_attempt_timeout_seconds: int = 20
+    provider_error_full_call_timeout_seconds: int = 20
     provider_policy_overrides: tuple[ProviderPolicyOverride, ...] = ()
     provider_attempt_timeout_failure_threshold: int = 2
     provider_attempt_timeout_failure_window_seconds: int = 300
@@ -128,6 +132,13 @@ class RouterSettings:
                 60,
                 _positive_int(raw.get("route_affinity_ttl_seconds"), 3_600),
             ),
+            route_direct_provider_calls_enabled=bool(
+                raw.get("route_direct_provider_calls_enabled", False)
+            ),
+            direct_provider_fallback_max_candidates=_positive_int(
+                raw.get("direct_provider_fallback_max_candidates"),
+                1,
+            ),
             disable_astrbot_error_fallback=bool(
                 raw.get("disable_astrbot_error_fallback", True)
             ),
@@ -180,6 +191,9 @@ class RouterSettings:
             ),
             provider_error_attempt_timeout_seconds=_positive_int(
                 raw.get("provider_error_attempt_timeout_seconds"), 20
+            ),
+            provider_error_full_call_timeout_seconds=_positive_int(
+                raw.get("provider_error_full_call_timeout_seconds"), 20
             ),
             provider_policy_overrides=provider_policy_overrides,
             provider_attempt_timeout_failure_threshold=max(
@@ -358,6 +372,9 @@ def _load_provider_policy_overrides(
         timeout_seconds = _optional_int(
             item.get("first_response_timeout_seconds")
         )
+        full_call_timeout_seconds = _optional_int(
+            item.get("full_call_timeout_seconds")
+        )
         request_max_retries = _optional_int(item.get("request_max_retries"))
         max_output_tokens = _optional_int(item.get("max_output_tokens"))
         overrides[provider_id.casefold()] = ProviderPolicyOverride(
@@ -365,6 +382,11 @@ def _load_provider_policy_overrides(
             first_response_timeout_seconds=(
                 max(0, timeout_seconds)
                 if timeout_seconds is not None
+                else None
+            ),
+            full_call_timeout_seconds=(
+                max(0, full_call_timeout_seconds)
+                if full_call_timeout_seconds is not None
                 else None
             ),
             request_max_retries=(

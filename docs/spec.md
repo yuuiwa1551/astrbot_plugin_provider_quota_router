@@ -1,6 +1,6 @@
 # AstrBot Provider Quota Router Spec
 
-## v0.15.0 当前契约
+## v0.16.0 当前契约
 
 - 独立源码仓库：`D:\astrbot\tmp_provider_quota_router_repo`；实时 Docker 数据根：`D:\astrbot\data -> /AstrBot/data`。不得把 `C:\Users\Administrator\astrbot` 当作当前运行目录。
 - 只有 `provider_source_id=openai` 命中的火山开发者计划使用本地日 token 保护；`volcengine-agent-plan/*`、中转站、DeepSeek 和其他 Token Plan 不参与该阈值。
@@ -13,6 +13,11 @@
 - `route_affinity_enabled=true` 时，普通自动路由按 UMO 哈希与标准化请求模态读取固定租约；有效亲和 Provider 只被移到候选首位，仍必须通过额度、reservation、安全余量、上游额度、模型/Source 冷却和模态检查。
 - 亲和租约从最终成功响应起固定计算 `route_affinity_ttl_seconds`，同模型成功不滑动续期；安全 fallback 成功后由实际 Provider 替换，旧慢请求与 unpin 前的在途请求不得回写覆盖。
 - 请求级 `selected_provider` 和 UMO `provider_perf_chat_completion` 为显式选择，完全绕过自动亲和；`.quota unpin` / `。quota unpin` 同时清理显式偏好与当前 UMO 的所有模态亲和。
+- `route_direct_provider_calls_enabled=true` 时，所有经已注册 AstrBot Chat Provider 发出的插件调用使用不可变 `DirectRoutePlan`；请求 Provider 优先，其后才是去重后的实时全局链，且不读写 UMO 会话亲和。
+- 插件直调必须在网络调用前跳过额度、模型/Source 冷却、缺失和模态不支持候选；实际失败后最多追加 `direct_provider_fallback_max_candidates` 个候选，流式首块发出后禁止重启其他模型。
+- 正常会话已有 RoutePlan、quota router 内部探测和已绑定的 `plugin_direct` 尝试不得递归路由；但第三方插件在主会话生命周期内嵌套发起的辅助调用仍须识别为插件直调。
+- `provider_error_attempt_timeout_seconds` 只约束流式首块；`provider_error_full_call_timeout_seconds` 独立约束非流式完整调用，Provider override 可分别覆盖。
+- 插件自己创建外部 SDK/HTTP 客户端的私有调用不在无侵入覆盖范围；TTS、embedding、rerank、STT 与生成式媒体不复用 Chat Provider 路由。
 - 只有插件实际执行 `switch/use_last` 且目标 Provider 与原 Provider 不同时，才输出“本次对话已由插件路由”INFO 日志；必须包含 conversation origin、原 Provider/模型、目标 Provider/模型、动作、原模型跳过原因 `trigger` 和目标状态 `target_status`。普通放行和同 Provider `use_last` 不输出，dry-run 不得冒充真实切换。
 - `allow_paid/use_last` 只能绕过火山本地额度，不能绕过缺失、模态、模型健康、Source 熔断或上游硬额度。
 - 下文保留最初 MVP 的背景和演进依据；凡与本节冲突，以本节及最新阶段计划为准。
@@ -112,6 +117,9 @@
   "exhausted_action": "stop",
   "route_affinity_enabled": false,
   "route_affinity_ttl_seconds": 3600,
+  "route_direct_provider_calls_enabled": false,
+  "direct_provider_fallback_max_candidates": 1,
+  "provider_error_full_call_timeout_seconds": 20,
   "chains": [
     {
       "name": "doubao-main",

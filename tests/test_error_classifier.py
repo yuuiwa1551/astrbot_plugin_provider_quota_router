@@ -12,8 +12,12 @@ from core.error_classifier import (
     SCOPE_NONE,
     SCOPE_SOURCE,
     classify_provider_error,
+    should_fallback_direct,
 )
-from core.opencode_quota_guard import ProviderAttemptTimeoutError
+from core.opencode_quota_guard import (
+    ProviderAttemptTimeoutError,
+    ProviderFullCallTimeoutError,
+)
 from core.policies import ProviderPolicy
 
 
@@ -79,6 +83,35 @@ class ErrorClassifierTests(unittest.TestCase):
         self.assertEqual(disposition.kind, ERROR_LOCAL_ATTEMPT_TIMEOUT)
         self.assertEqual(disposition.scope, SCOPE_NONE)
         self.assertIsNone(disposition.cooldown_seconds)
+
+    def test_full_call_timeout_is_a_local_fallback_budget(self) -> None:
+        error = ProviderFullCallTimeoutError(
+            "provider/model full call timed out after 20 seconds"
+        )
+        disposition = classify_provider_error(error=error, policy=policy())
+
+        self.assertEqual(disposition.kind, ERROR_LOCAL_ATTEMPT_TIMEOUT)
+        self.assertTrue(
+            should_fallback_direct(error=error, disposition=disposition)
+        )
+
+    def test_direct_content_policy_error_does_not_change_provider(self) -> None:
+        error = RuntimeError("content policy violation")
+        disposition = classify_provider_error(error=error, policy=policy())
+
+        self.assertEqual(disposition.kind, ERROR_REQUEST)
+        self.assertFalse(
+            should_fallback_direct(error=error, disposition=disposition)
+        )
+
+    def test_direct_capability_error_can_use_compatible_provider(self) -> None:
+        error = RuntimeError("the model is not a VLM")
+        disposition = classify_provider_error(error=error, policy=policy())
+
+        self.assertEqual(disposition.kind, ERROR_REQUEST)
+        self.assertTrue(
+            should_fallback_direct(error=error, disposition=disposition)
+        )
 
     def test_unknown_error_uses_short_model_cooldown(self) -> None:
         disposition = classify_provider_error(

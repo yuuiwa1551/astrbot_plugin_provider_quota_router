@@ -313,3 +313,24 @@ deepseek/deepseek-v4-pro
 - 只有最终成功模型建立亲和；同模型不滑动续期，fallback 成功替换亲和，并防止并发旧请求回写。
 - 亲和只影响顺序，不绕过本地日额度、reservation、安全余量、上游额度、健康冷却、Source 熔断和模态检查。
 - 日志、状态 API 与 Plugin Page 展示亲和命中、过期、绕过、Provider、模态和到期时间。
+
+## 21期 插件 Provider 直调统一路由
+
+目标：让使用 `StarContext.llm_generate`、`tool_loop_agent` 或直接调用
+`Provider.text_chat/text_chat_stream` 的插件请求，也复用 quota router 的额度、
+冷却、熔断、模态过滤和限量 fallback，不再持续撞击已冷却模型。
+
+状态：v0.16.0 实施中，详见 `21期plan.md`。
+
+计划交付：
+
+- 新增不可变 `DirectRoutePlan` 和插件直调路由服务；正常会话 `RoutePlan` 保持不变。
+- 插件请求的 Provider 作为首选，随后使用去重后的实时全局 fallback 链；首选不在
+  全局链时使用请求级临时链，不把辅助模型加入普通聊天优先级。
+- 统一覆盖 SDK `llm_generate`、工具循环和直接 Provider 文本/流式调用；普通会话、
+  quota router 探测及显式 guard bypass 不重复接管。
+- 直调不读取或写入会话模型亲和；按实际 Provider 预占、归因并释放本地额度。
+- 当前请求最多尝试配置数量的安全备用模型；流式请求只允许在首个输出前 fallback。
+- 修正非流式调用把“首响应超时”错误当作“整段生成超时”的问题。
+- 决策日志、状态 API 和 Plugin Page 展示直调插件、请求 Provider、实际 Provider、
+  fallback 原因与耗时。

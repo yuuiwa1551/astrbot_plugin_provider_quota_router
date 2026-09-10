@@ -99,6 +99,123 @@ def make_provider(
 
 
 class RouterSafetyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_direct_order_keeps_out_of_chain_requested_provider_first(
+        self,
+    ) -> None:
+        requested_id = "volcengine-agent-plan/mini"
+        fallback_id = "relay/global"
+        providers = {
+            requested_id: make_provider(requested_id, ["text"]),
+            fallback_id: make_provider(fallback_id, ["text"]),
+        }
+        router = ProviderQuotaRouter(
+            settings=RouterSettings(
+                chains=[ChainConfig(name="global", providers=[fallback_id])],
+            ),
+            ledger=MapLedger({}),
+            state=FakeState(),
+            get_provider=providers.get,
+        )
+
+        decision = await router.decide_order(
+            current_provider_id=requested_id,
+            provider_order=(requested_id, fallback_id),
+            window=SimpleNamespace(window_id="window-a"),
+            required_modalities={"text"},
+        )
+
+        self.assertEqual(decision.action, "allow")
+        self.assertEqual(decision.selected_provider_id, requested_id)
+        self.assertEqual(
+            decision.provider_order,
+            (requested_id, fallback_id),
+        )
+
+    async def test_direct_order_skips_cooled_requested_provider(
+        self,
+    ) -> None:
+        requested_id = "volcengine-agent-plan/mini"
+        fallback_id = "relay/global"
+        providers = {
+            requested_id: make_provider(requested_id, ["text"]),
+            fallback_id: make_provider(fallback_id, ["text"]),
+        }
+        state = FakeState()
+        state.provider_model_circuits[requested_id] = {
+            "provider_id": requested_id,
+            "retry_at": time.time() + 300,
+        }
+        router = ProviderQuotaRouter(
+            settings=RouterSettings(
+                chains=[ChainConfig(name="global", providers=[fallback_id])],
+            ),
+            ledger=MapLedger({}),
+            state=state,
+            get_provider=providers.get,
+        )
+
+        decision = await router.decide_order(
+            current_provider_id=requested_id,
+            provider_order=(requested_id, fallback_id),
+            window=SimpleNamespace(window_id="window-a"),
+            required_modalities={"text"},
+        )
+
+        self.assertEqual(decision.action, "switch")
+        self.assertEqual(decision.selected_provider_id, fallback_id)
+        self.assertEqual(
+            decision.candidates[0].reason,
+            "provider_error_cooldown",
+        )
+
+    async def test_direct_out_of_chain_managed_provider_is_reserved(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            requested_id = "openai/direct-mini"
+            fallback_id = "relay/global"
+            providers = {
+                requested_id: make_provider(
+                    requested_id,
+                    ["text"],
+                    "openai",
+                ),
+                fallback_id: make_provider(fallback_id, ["text"]),
+            }
+            state = QuotaStateStore(Path(temp_dir))
+            router = ProviderQuotaRouter(
+                settings=RouterSettings(
+                    default_daily_limit_tokens=1_000,
+                    default_safety_buffer_tokens=0,
+                    default_request_reservation_tokens=60,
+                    chains=[
+                        ChainConfig(name="global", providers=[fallback_id])
+                    ],
+                ),
+                ledger=MapLedger({}),
+                state=state,
+                get_provider=providers.get,
+            )
+
+            decision = await router.decide_order_and_reserve(
+                request_id="direct-request",
+                current_provider_id=requested_id,
+                provider_order=(requested_id, fallback_id),
+                window=SimpleNamespace(window_id="window-a"),
+                required_modalities={"text"},
+            )
+            snapshot = await state.snapshot()
+
+            self.assertEqual(decision.selected_provider_id, requested_id)
+            self.assertEqual(
+                snapshot["pending"]["direct-request"]["provider_id"],
+                requested_id,
+            )
+            self.assertEqual(
+                snapshot["pending"]["direct-request"]["tokens"],
+                60,
+            )
+
     async def test_concurrent_decisions_reserve_atomically(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             provider_id = "openai/local"

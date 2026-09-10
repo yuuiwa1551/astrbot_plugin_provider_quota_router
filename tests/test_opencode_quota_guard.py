@@ -3,12 +3,17 @@ from __future__ import annotations
 import asyncio
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from core.opencode_quota_guard import (
+    DIRECT_ROUTE_NOT_HANDLED,
     OpenCodeQuotaCooldownError,
     ProviderAttemptTimeoutError,
+    ProviderFullCallTimeoutError,
+    begin_provider_guard_bypass,
     bind_provider_guard_route_plan,
     current_provider_guard_provider_id,
+    end_provider_guard_bypass,
     install_opencode_quota_guard,
     is_opencode_quota_guard_installed,
     reset_provider_guard_route_plan,
@@ -52,10 +57,13 @@ class FakeOwner:
         self.cooldown = None
         self.errors = []
         self.timeout = 0.0
+        self.full_timeout = 0.0
         self.request_max_retries = 1
         self.max_output_tokens = None
         self.attempts = []
         self.successes = []
+        self.direct_result = DIRECT_ROUTE_NOT_HANDLED
+        self.direct_calls = []
 
     async def opencode_quota_guard_cooldown(self, provider):
         return self.cooldown
@@ -69,6 +77,9 @@ class FakeOwner:
     def opencode_quota_guard_timeout_seconds(self, provider):
         return self.timeout
 
+    def opencode_quota_guard_full_call_timeout_seconds(self, provider):
+        return self.full_timeout
+
     def opencode_quota_guard_max_output_tokens(self, provider):
         return self.max_output_tokens
 
@@ -77,6 +88,15 @@ class FakeOwner:
 
     async def opencode_quota_guard_success(self, provider):
         self.successes.append(provider)
+
+    async def opencode_quota_guard_direct_text_chat(
+        self,
+        provider,
+        args,
+        kwargs,
+    ):
+        self.direct_calls.append((provider, args, kwargs))
+        return self.direct_result
 
 
 class OpenCodeQuotaGuardTests(unittest.IsolatedAsyncioTestCase):
@@ -124,19 +144,35 @@ class OpenCodeQuotaGuardTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(provider.calls, 0)
 
-    async def test_first_response_timeout_is_reported_and_raised(self) -> None:
+    async def test_full_call_timeout_is_reported_and_raised(self) -> None:
         provider = FakeProvider()
         provider.delay = 0.05
-        self.owner.timeout = 0.01
+        self.owner.full_timeout = 0.01
 
         with self.assertRaisesRegex(
-            ProviderAttemptTimeoutError,
-            "first response timed out after 0.01 seconds",
+            ProviderFullCallTimeoutError,
+            "full call timed out after 0.01 seconds",
         ):
             await provider.text_chat(prompt="test")
 
         self.assertEqual(provider.calls, 1)
         self.assertEqual(len(self.owner.errors), 1)
+
+    async def test_nonstream_does_not_use_stream_first_response_timeout(
+        self,
+    ) -> None:
+        provider = FakeProvider()
+        provider.delay = 0.03
+        provider.response = SimpleNamespace(
+            role="assistant",
+            completion_text="ok",
+        )
+        self.owner.timeout = 0.01
+
+        response = await provider.text_chat(prompt="test")
+
+        self.assertEqual(response.completion_text, "ok")
+        self.assertEqual(provider.calls, 1)
 
     async def test_provider_timeout_exception_is_not_rewrapped_as_local_budget(
         self,
@@ -240,6 +276,124 @@ class OpenCodeQuotaGuardTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(provider.calls, 1)
         self.assertEqual(len(self.owner.errors), 1)
+
+    async def test_direct_handler_can_take_over_unbound_calls(self) -> None:
+        provider = FakeProvider()
+        self.owner.direct_result = SimpleNamespace(
+            role="assistant",
+            completion_text="routed",
+        )
+
+        response = await provider.text_chat(prompt="test")
+
+        self.assertEqual(response.completion_text, "routed")
+        self.assertEqual(provider.calls, 0)
+        self.assertEqual(len(self.owner.direct_calls), 1)
+
+    async def test_bound_route_plan_bypasses_direct_handler(self) -> None:
+        provider = FakeProvider()
+        provider.response = SimpleNamespace(
+            role="assistant",
+            completion_text="normal",
+        )
+        self.owner.direct_result = SimpleNamespace(
+            role="assistant",
+            completion_text="wrong",
+        )
+        token = bind_provider_guard_route_plan(object())
+        try:
+            response = await provider.text_chat(prompt="test")
+        finally:
+            reset_provider_guard_route_plan(token)
+
+        self.assertEqual(response.completion_text, "normal")
+        self.assertEqual(provider.calls, 1)
+
+    async def test_plugin_call_inside_normal_route_plan_is_direct_routed(
+        self,
+    ) -> None:
+        provider = FakeProvider()
+        self.owner.direct_result = SimpleNamespace(
+            role="assistant",
+            completion_text="nested-routed",
+        )
+        token = bind_provider_guard_route_plan(object())
+        try:
+            with patch(
+                "core.opencode_quota_guard.detect_plugin_caller",
+                return_value="astrbot_plugin_stealer",
+            ):
+                response = await provider.text_chat(prompt="test")
+        finally:
+            reset_provider_guard_route_plan(token)
+
+        self.assertEqual(response.completion_text, "nested-routed")
+        self.assertEqual(provider.calls, 0)
+
+    async def test_probe_bypass_scope_skips_direct_handler(self) -> None:
+        provider = FakeProvider()
+        provider.response = SimpleNamespace(
+            role="assistant",
+            completion_text="probe",
+        )
+        self.owner.direct_result = SimpleNamespace(
+            role="assistant",
+            completion_text="wrong",
+        )
+        token = begin_provider_guard_bypass("source")
+        try:
+            response = await provider.text_chat(prompt="probe")
+        finally:
+            end_provider_guard_bypass(token)
+
+        self.assertEqual(response.completion_text, "probe")
+        self.assertEqual(provider.calls, 1)
+
+    async def test_inherited_guards_run_once_for_same_provider(self) -> None:
+        class ParentProvider:
+            def __init__(self) -> None:
+                self.provider_config = {"id": "provider/inherited"}
+                self.calls = 0
+
+            async def text_chat(self, *args, **kwargs):
+                self.calls += 1
+                return SimpleNamespace(
+                    role="assistant",
+                    completion_text="ok",
+                )
+
+            async def text_chat_stream(self, *args, **kwargs):
+                self.calls += 1
+                yield "chunk"
+
+        class ChildProvider(ParentProvider):
+            pass
+
+        install_opencode_quota_guard(self.owner, ParentProvider)
+        install_opencode_quota_guard(self.owner, ChildProvider)
+        provider = ChildProvider()
+        try:
+            response = await provider.text_chat(prompt="test")
+            chunks = [
+                chunk
+                async for chunk in provider.text_chat_stream(prompt="test")
+            ]
+        finally:
+            uninstall_opencode_quota_guard(self.owner, ChildProvider)
+            uninstall_opencode_quota_guard(self.owner, ParentProvider)
+
+        self.assertEqual(response.completion_text, "ok")
+        self.assertEqual(chunks, ["chunk"])
+        self.assertEqual(provider.calls, 2)
+        self.assertEqual(len(self.owner.direct_calls), 1)
+        self.assertEqual(self.owner.successes, [provider, provider])
+        self.assertNotIn("text_chat", ChildProvider.__dict__)
+        self.assertNotIn("text_chat_stream", ChildProvider.__dict__)
+        self.assertIs(ChildProvider.text_chat, ParentProvider.text_chat)
+        self.assertIs(
+            ChildProvider.text_chat_stream,
+            ParentProvider.text_chat_stream,
+        )
 
     async def test_uninstall_restores_original_methods(self) -> None:
         self.assertTrue(is_opencode_quota_guard_installed(FakeProvider))

@@ -21,8 +21,9 @@ AstrBot provider/model 日额度路由插件。它按配置的每日 token 额�
 - 达到阈值的受控模型会把 24 小时冷却写入 `quota_state.json`，跨重启和 11:00 窗口仍有效；插件会在 provider manager 就绪后延迟执行启动对账，并在每次受控模型响应后再次检查，避免最后一条请求跨线但没有后续请求时漏记。
 - 只有 `volcengine_provider_source_ids` 指定的火山 Provider Source 使用本地 token 上限；按模型名统计时 SQL 还会限定到这些本地额度 Provider ID，付费 Token Plan 的同名模型不会串账。中转站、DeepSeek 及其他非火山 Provider 不阻断也不预占。
 - 默认把 `opencode-zen/` 从火山 token 安全阈值中排除；具体模型返回 `FreeUsageLimitError` 后，只冷却该模型，用户请求期间零外呼，后台探测成功后恢复，其他 opencode 模型继续可选。
-- opencode 额度保护同时覆盖 Agent 请求与图片描述等直接 Provider 调用；冷却期间直接调用会在发出网络请求前被拦截。
-- 可按完整 Provider ID 为 OpenAI-compatible 调用设置专属首响应、请求次数和输出 Token 上限；直接调用与 Agent 调用共用同一份不可变 Provider 策略，未命中覆盖时沿用全局配置。
+- 可选接管所有插件经 AstrBot Chat Provider 发出的 `llm_generate`、`tool_loop_agent`、`text_chat` 与 `text_chat_stream` 调用；请求模型先用，额度、冷却、熔断、缺失或模态不支持时在零外呼条件下选择安全 fallback。
+- 插件直调使用独立不可变 `DirectRoutePlan`，同一次调用最多再试一个模型，不读写 UMO 会话亲和；流式输出首块发出后不再换模型，避免重复文本。
+- 可按完整 Provider ID 设置专属流式首响应、非流式完整调用、请求次数和输出 Token 上限；普通对话与插件直调共用同一份不可变 Provider 策略，未命中覆盖时沿用全局配置。
 - Provider/SDK 自己报告的超时、连接失败、普通 429、5xx 等明确故障默认只冷却实际失败模型 30 分钟；插件自己的单次 20 秒首响应预算耗尽只 fallback，5 分钟内连续两次才短冷却 5 分钟。未知边界异常也短冷却 5 分钟。上下文、模态、工具、附件、内容审核和 400/422 请求错误不污染模型健康状态。
 - Agent 当前模型失败后使用插件过滤过的安全 fallback；候选按本次请求顺序和独立数量上限按需计算，默认一条消息最多再试一个安全模型。
 - 火山开发者计划明确返回 `AccountOverdueError` 等账号级故障后，整组火山模型熔断 30 分钟；普通请求级 403 不连坐。到期由后台从同 Source 的 token 安全文本模型中探测，成功才恢复整组。
@@ -53,6 +54,8 @@ AstrBot provider/model 日额度路由插件。它按配置的每日 token 额�
 | `strict_priority_order` | `true` | 普通会话从链首检查；请求/UMO 明确选择优先 |
 | `route_affinity_enabled` | `false` | 是否按 UMO 与模态保持最近成功模型；本机部署显式开启 |
 | `route_affinity_ttl_seconds` | `3600` | 从首次成功响应起计算的固定租约，不滑动续期 |
+| `route_direct_provider_calls_enabled` | `false` | 是否统一路由插件经 AstrBot Chat Provider 发出的辅助调用；本机部署显式开启 |
+| `direct_provider_fallback_max_candidates` | `1` | 插件直调实际失败后，本次最多再试的安全备用模型数；预检查跳过不计数 |
 | `disable_astrbot_error_fallback` | `true` | 兼容配置键；开启后由插件接管并过滤 AstrBot 当前请求的错误 fallback |
 | `quota_cooldown_seconds` | `86400` | 受控模型达到阈值后的冷却时间 |
 | `unlimited_provider_prefixes` | `["deepseek/"]` | 兼容配置；所有非火山 Provider 均不参与本地 token 限制 |
@@ -67,8 +70,9 @@ AstrBot provider/model 日额度路由插件。它按配置的每日 token 额�
 | `unknown_provider_error_cooldown_seconds` | `300` | 未识别 Provider 边界异常的短冷却时间 |
 | `provider_error_request_max_retries` | `1` | 每个受管模型在当前调用中的最大尝试次数；失败后立即切换 |
 | `provider_error_fallback_max_candidates` | `1` | 当前消息最多继续尝试的安全备用 Provider 数；`0` 表示不继续逐层尝试 |
-| `provider_error_attempt_timeout_seconds` | `20` | OpenAI-compatible 模型首响应墙钟预算；耗尽后结束当前尝试并 fallback，`0` 表示关闭 |
-| `provider_policy_overrides_json` | 空 | 按完整 Provider ID 覆盖首响应秒数、请求次数和输出 Token 上限；未命中时使用全局值 |
+| `provider_error_attempt_timeout_seconds` | `20` | 流式调用首块响应预算；耗尽后结束当前尝试并 fallback，`0` 表示关闭 |
+| `provider_error_full_call_timeout_seconds` | `20` | 非流式完整调用预算；与流式首块预算独立，`0` 表示关闭 |
+| `provider_policy_overrides_json` | 空 | 按完整 Provider ID 覆盖流式首响应、非流式完整调用、请求次数和输出 Token 上限 |
 | `provider_attempt_timeout_failure_threshold` | `2` | 统计窗口内连续多少次本地首响应超时才开启短冷却；成功会清零 |
 | `provider_attempt_timeout_failure_window_seconds` | `300` | 本地首响应超时连续计数窗口 |
 | `provider_attempt_timeout_cooldown_seconds` | `300` | 达到连续阈值后的模型短冷却 |
@@ -107,13 +111,14 @@ Provider 专属调用预算示例：
   {
     "provider_id": "volcengine-agent-plan/doubao-seed-2.0-mini",
     "first_response_timeout_seconds": 3,
+    "full_call_timeout_seconds": 10,
     "request_max_retries": 1,
     "max_output_tokens": 220
   }
 ]
 ```
 
-覆盖按完整 Provider ID（不区分大小写）精确匹配。`first_response_timeout_seconds=0` 关闭该 Provider 的插件首响应计时，`max_output_tokens=0` 不设置输出上限。输出上限不会放大调用方已有的小值；例如调用方请求 15 Token 时仍保持 15。为避免正常长回答被截断，建议只给辅助用途的专用 Provider 配置输出上限。
+覆盖按完整 Provider ID（不区分大小写）精确匹配。`first_response_timeout_seconds` 只限制流式首块，`full_call_timeout_seconds` 只限制非流式完整调用；各自设为 `0` 可关闭。`max_output_tokens=0` 不设置输出上限。输出上限不会放大调用方已有的小值；例如调用方请求 15 Token 时仍保持 15。为避免正常长回答被截断，建议只给辅助用途的专用 Provider 配置输出上限。
 
 ## 命令
 
@@ -190,13 +195,15 @@ AstrBot 的 LLM 流程里，`on_waiting_llm_request` 在 main agent 构建和 pr
 
 `provider_error_cooldown_enabled=true` 时，错误先经过统一分类。Provider/SDK 自己抛出的超时、连接失败、408、普通 429、5xx 使用 1800 秒模型健康冷却；未知 Provider 边界异常默认短冷却 300 秒；上下文过长、模态/工具不支持、附件非法、内容审核和 400/422 请求错误不写健康状态。`FreeUsageLimitError` 只写 opencode 上游额度状态，明确 `AccountOverdueError` 才允许打开火山 Source 熔断。
 
-`provider_error_attempt_timeout_seconds=20` 会限制 OpenAI-compatible 模型等待首个响应的时间。普通调用在 20 秒内未完成、流式调用在 20 秒内没有首个 chunk，都会结束当前尝试并立即 fallback；后续流式输出不受这个首响应计时器限制。`provider_policy_overrides_json` 命中完整 Provider ID 时，可把该 Provider 的首响应和请求次数替换为专属值，并在调用边界收紧 `max_tokens/max_completion_tokens`；未命中的 Provider 不受影响。单次本地墙钟预算耗尽不能证明上游故障，因此不会直接写 30 分钟健康冷却。默认同一 Provider 在 `provider_attempt_timeout_failure_window_seconds=300` 内连续达到 `provider_attempt_timeout_failure_threshold=2` 次才短冷却 `provider_attempt_timeout_cooldown_seconds=300` 秒；任一次成功会清零连续计数。Provider 自己抛出的真实超时仍按明确瞬态故障立即冷却 30 分钟。引用消息里的图片和语音会递归识别，路由阶段不会再先选纯文本模型后被 AstrBot 核心打回正在冷却的多模态模型。
+`provider_error_attempt_timeout_seconds=20` 只限制流式调用等待首个 chunk 的时间，后续流式输出不受它限制；`provider_error_full_call_timeout_seconds=20` 独立限制非流式完整生成。`provider_policy_overrides_json` 命中完整 Provider ID 时，可分别覆盖两类预算、请求次数，并在调用边界收紧 `max_tokens/max_completion_tokens`；未命中的 Provider 沿用全局值。单次本地墙钟预算耗尽不能证明上游故障，因此不会直接写 30 分钟健康冷却。默认同一 Provider 在 `provider_attempt_timeout_failure_window_seconds=300` 内连续达到 `provider_attempt_timeout_failure_threshold=2` 次才短冷却 `provider_attempt_timeout_cooldown_seconds=300` 秒；任一次成功会清零连续计数。Provider 自己抛出的真实超时仍按明确瞬态故障立即冷却 30 分钟。引用消息里的图片和语音会递归识别，路由阶段不会再先选纯文本模型后被 AstrBot 核心打回正在冷却的多模态模型。
 
 默认 fallback 链在每次 LLM 请求前对 `data/cmd_config.json` 做一次轻量 `stat`；只有签名变化时才使用 `utf-8-sig` 读取 JSON 并原子替换 router，因此修改列表后的下一条消息即可看到新链。同时保留低频后台任务，默认每 300 秒在无请求时兜底检查一次。文件有其他配置变化但 fallback 内容相同时，不重建 router。
 
 `strict_priority_order=true` 仍定义没有有效亲和时的全局顺序。`route_affinity_enabled=true` 后，普通自动路由会先检查当前 UMO 与模态的固定租约 Provider，再按去重后的全局链首到链尾检查；高优先级模型在租约内恢复不会触发主动切回，但额度、冷却、熔断和模态不支持仍会立即使亲和候选失效。租约从首次成功响应起固定计算，后续同模型成功只更新并发水位，不延长到期时间；实际 fallback 成功会为新模型建立新的固定租约。
 
 请求携带 `selected_provider`，或 AstrBot 在 UMO 范围保存了 `provider_perf_chat_completion` 时，插件会把该明确选择放到本次候选顺序第一位并完全绕过自动亲和；它不可用时再按原全局顺序检查其余 Provider。`.quota unpin` / `。quota unpin` 同时删除该显式偏好和当前 UMO 的全部模态亲和。
+
+`route_direct_provider_calls_enabled=true` 后，插件通过 AstrBot Chat Provider 发出的辅助调用按“请求 Provider → 去重后的实时全局链”检查。冷却、额度、Source 熔断、Provider 缺失和模态不支持在网络调用前跳过；实际调用失败时按更严格的错误分类最多使用 `direct_provider_fallback_max_candidates` 个备用模型，内容审核、上下文过长和一般 400/422 不跨模型重试，明确的模态/工具能力错误允许换模型。普通会话 RoutePlan、quota router 内部探测和已开始的 `plugin_direct` 尝试不会被递归接管。每次结果写入最近决策，包含 `route_kind=plugin_direct`、调用插件、请求/实际 Provider、尝试结果与耗时；它不建立或覆盖会话亲和。
 
 AstrBot 自己还会在 provider 返回 403、超时或错误响应时执行一套运行中 fallback。`disable_astrbot_error_fallback=true` 是早期版本保留的兼容键；现在它不会清空后续候选，而是按本请求 RoutePlan 的顺序、额度、冷却、火山熔断和请求模态过滤后注入 runner。`provider_error_request_max_retries=1` 只限制每个 Provider 自己的调用尝试；独立的 `provider_error_fallback_max_candidates=1` 才负责把当前消息的备用 Provider 数量封顶为一个。候选按需扫描，异常抛出后按错误分类更新状态并切换，本地首响应预算首次耗尽只影响当前请求。
 
@@ -210,10 +217,10 @@ AstrBot 的最终 `role=err` 响应不会经过普通的 Agent done hook，因�
 
 ## 已知限制
 
-- 处理 AstrBot 内部聊天模型 provider，并保护使用同一 AstrBot OpenAI Provider 实例的直接调用；不处理 TTS、embedding 或完全绕过 AstrBot Provider 的外部 API。
+- 处理已注册的 AstrBot Chat Provider 及插件经它们发出的调用；不处理 TTS、embedding、rerank、STT、图片/视频生成或插件自己创建的外部 SDK/HTTP 客户端。
 - 如果 provider 不返回 usage，AstrBot `ProviderStat` 可能记录 0，插件会无法准确判断真实额度。
 - 如果其他 provider 路由类插件在更低 priority 后覆盖 `selected_provider`，最终 provider 可能不是本插件选择的 provider。
-- 图片分类、后台好感度等直接 Provider 调用没有 Agent runner 的 fallback 上下文；插件会让它们按首响应预算快速失败并按错误分类更新状态，但不会擅自替这些业务选择另一个模型。
+- 插件直调按单次 Provider 调用路由，不建立会话亲和；缓存命中和跨多次辅助调用的模型稳定性仍取决于调用方固定的请求 Provider 与实时健康状态。
 - 会话亲和只能稳定 Provider/模型选择；上游缓存是否命中仍取决于请求前缀、上下文内容、Provider 的缓存策略与缓存有效期。
 
 ## Roadmap
@@ -221,6 +228,13 @@ AstrBot 的最终 `role=err` 响应不会经过普通的 Agent done hook，因�
 - Future：火山引擎官方用量 API 对账、按 API key/account 分组额度、与 provider 负载均衡插件集成。
 
 ## 更新历史
+
+### v0.16.0
+
+- 新增插件 Chat Provider 直调统一路由，覆盖 `llm_generate`、`tool_loop_agent` 以及原始普通/流式 Provider 调用；请求模型冷却或不可用时立即选择安全 fallback。
+- 新增不可变 `DirectRoutePlan`、单次备用模型上限、reservation/usage 归因、插件调用者识别与 `plugin_direct` 决策日志；辅助调用不参与会话亲和。
+- 拆分流式首块预算与非流式完整调用预算，避免 Mini 的 3 秒首块策略错误截断非流式完整响应。
+- 动态保护内置与第三方 Chat Provider 具体类，并避免父子 Provider guard 嵌套重复执行；内部探测与普通会话请求不会被递归接管。
 
 ### v0.15.0
 

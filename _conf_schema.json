@@ -105,6 +105,18 @@
     "hint": "从首次成功响应起计算的固定租约，不因后续成功回复滑动续期。当前建议 3600 秒。",
     "default": 3600
   },
+  "route_direct_provider_calls_enabled": {
+    "description": "统一路由插件 Provider 直调",
+    "type": "bool",
+    "hint": "接管插件通过 AstrBot Chat Provider 发出的 llm_generate、tool_loop_agent、text_chat 和 text_chat_stream 调用。请求模型优先，冷却或故障时使用安全全局 fallback；不参与会话亲和。升级默认关闭。",
+    "default": false
+  },
+  "direct_provider_fallback_max_candidates": {
+    "description": "插件直调最多备用模型数",
+    "type": "int",
+    "hint": "插件请求的实际模型失败后，本次直调最多再尝试多少个安全 Provider。冷却、额度、熔断和模态检查阶段跳过的模型不计入该数量。默认 1。",
+    "default": 1
+  },
   "disable_astrbot_error_fallback": {
     "description": "接管 AstrBot 错误 fallback（兼容键）",
     "type": "bool",
@@ -190,15 +202,21 @@
     "default": 1
   },
   "provider_error_attempt_timeout_seconds": {
-    "description": "单模型首响应超时秒数",
+    "description": "流式首响应超时秒数",
     "type": "int",
-    "hint": "OpenAI-compatible 模型在该时间内没有返回首个响应就立即结束当前尝试并切换。默认 20 秒；设为 0 关闭插件超时。单次本地预算耗尽不会直接判定上游故障。",
+    "hint": "text_chat_stream 在该时间内没有返回首个响应就立即结束当前尝试并切换。不会再错误限制非流式完整生成。默认 20 秒；设为 0 关闭。",
+    "default": 20
+  },
+  "provider_error_full_call_timeout_seconds": {
+    "description": "非流式完整调用超时秒数",
+    "type": "int",
+    "hint": "text_chat 完整生成的独立墙钟上限。默认 20 秒；Provider 专属 full_call_timeout_seconds 可覆盖，设为 0 关闭。",
     "default": 20
   },
   "provider_policy_overrides_json": {
     "description": "Provider 专属调用预算 JSON",
     "type": "text",
-    "hint": "按完整 Provider ID 覆盖首响应秒数、单模型请求次数和输出 Token 上限。格式：[{\"provider_id\":\"source/model\",\"first_response_timeout_seconds\":3,\"request_max_retries\":1,\"max_output_tokens\":220}]。超时或输出上限设为 0 表示关闭该项。",
+    "hint": "按完整 Provider ID 覆盖流式首响应秒数、非流式完整调用秒数、单模型请求次数和输出 Token 上限。格式：[{\"provider_id\":\"source/model\",\"first_response_timeout_seconds\":3,\"full_call_timeout_seconds\":20,\"request_max_retries\":1,\"max_output_tokens\":220}]。超时或输出上限设为 0 表示关闭该项。",
     "default": ""
   },
   "provider_attempt_timeout_failure_threshold": {

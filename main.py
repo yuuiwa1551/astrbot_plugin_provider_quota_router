@@ -59,12 +59,18 @@ from .core.provider_errors import (
     response_error_text,
 )
 from .core.provider_selection import ProviderSelection
+from .core.direct_route import (
+    DirectRoutePlan,
+    DirectRouteService,
+)
 from .core.opencode_quota_guard import (
+    DIRECT_ROUTE_NOT_HANDLED,
     begin_provider_guard_bypass,
     bind_provider_guard_route_plan,
     current_provider_guard_provider_id,
     end_provider_guard_bypass,
     install_opencode_quota_guard,
+    load_builtin_chat_provider_classes,
     reset_provider_guard_route_plan,
     uninstall_opencode_quota_guard,
 )
@@ -88,7 +94,7 @@ from .core.time_window import current_window, window_for_local_date
 
 
 PLUGIN_NAME = "astrbot_plugin_provider_quota_router"
-PLUGIN_VERSION = "0.15.0"
+PLUGIN_VERSION = "0.16.0"
 PLUGIN_REPOSITORY = "https://github.com/yuuiwa1551/astrbot_plugin_provider_quota_router"
 PLUGIN_DESCRIPTION = "按 provider/model 每日 token 额度自动降级路由 AstrBot 聊天模型。"
 HOOK_PRIORITY = 900
@@ -112,6 +118,8 @@ CONFIG_KEYS = {
     "strict_priority_order",
     "route_affinity_enabled",
     "route_affinity_ttl_seconds",
+    "route_direct_provider_calls_enabled",
+    "direct_provider_fallback_max_candidates",
     "disable_astrbot_error_fallback",
     "quota_cooldown_seconds",
     "unlimited_provider_prefixes",
@@ -127,6 +135,7 @@ CONFIG_KEYS = {
     "provider_error_request_max_retries",
     "provider_error_fallback_max_candidates",
     "provider_error_attempt_timeout_seconds",
+    "provider_error_full_call_timeout_seconds",
     "provider_policy_overrides",
     "provider_policy_overrides_json",
     "provider_attempt_timeout_failure_threshold",
@@ -174,6 +183,7 @@ class ProviderQuotaRouterPlugin(Star):
         self._core_fallback_guard_owner = object()
         self._core_fallback_guard_active = False
         self._opencode_quota_guard_active = False
+        self._provider_guard_classes: set[type] = set()
         self._attempt_timeout_tracker = AttemptTimeoutTracker()
         self.settings = self._load_settings()
         self.data_dir = self._resolve_data_dir()
@@ -192,13 +202,14 @@ class ProviderQuotaRouterPlugin(Star):
         logger.info(
             "[ProviderQuotaRouter] loaded: enabled=%s chains=%d "
             "provider_policy_overrides=%d quota_key_mode=%s dry_run=%s "
-            "fallback_source=%s",
+            "fallback_source=%s direct_route=%s",
             self.settings.enabled,
             len(self.settings.chains),
             len(self.settings.provider_policy_overrides),
             self.settings.quota_key_mode,
             self.settings.dry_run,
             self._fallback_chain_source,
+            self.settings.route_direct_provider_calls_enabled,
         )
 
     async def initialize(self) -> None:
@@ -501,40 +512,86 @@ class ProviderQuotaRouterPlugin(Star):
             and (
                 self.settings.provider_error_cooldown_enabled
                 or self.settings.upstream_quota_provider_prefixes
+                or self.settings.route_direct_provider_calls_enabled
             )
             and not self.settings.dry_run
         )
-        if should_enable and not self._opencode_quota_guard_active:
-            try:
-                self._opencode_quota_guard_active = install_opencode_quota_guard(
-                    self
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "[ProviderQuotaRouter] failed to install opencode quota guard: %s",
-                    exc,
-                )
-                self._opencode_quota_guard_active = False
-            else:
-                logger.info(
-                    "[ProviderQuotaRouter] provider call cooldown guard enabled: "
-                    "error_cooldown=%s prefixes=%s",
-                    self.settings.provider_error_cooldown_enabled,
-                    self.settings.upstream_quota_provider_prefixes,
-                )
-        elif not should_enable:
+        if not should_enable:
             self._disable_opencode_quota_guard()
-
-    def _disable_opencode_quota_guard(self) -> None:
-        if not self._opencode_quota_guard_active:
             return
+
+        current_classes = set(
+            getattr(self, "_provider_guard_classes", set())
+        )
         try:
-            uninstall_opencode_quota_guard(self)
+            desired_classes = {
+                type(provider)
+                for provider in self.context.get_all_providers()
+                if callable(getattr(provider, "text_chat", None))
+                and callable(getattr(provider, "text_chat_stream", None))
+            }
+            desired_classes.update(load_builtin_chat_provider_classes())
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "[ProviderQuotaRouter] failed to remove opencode quota guard: %s",
+                "[ProviderQuotaRouter] failed to enumerate chat Provider classes: %s",
                 exc,
             )
+            desired_classes = current_classes
+
+        installed = set(current_classes)
+        for provider_cls in desired_classes - current_classes:
+            try:
+                if install_opencode_quota_guard(self, provider_cls):
+                    installed.add(provider_cls)
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "[ProviderQuotaRouter] failed to install Provider call guard: "
+                    "class=%s error=%s",
+                    provider_cls.__name__,
+                    exc,
+                )
+        for provider_cls in current_classes - desired_classes:
+            try:
+                uninstall_opencode_quota_guard(self, provider_cls)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[ProviderQuotaRouter] failed to remove stale Provider guard: "
+                    "class=%s error=%s",
+                    provider_cls.__name__,
+                    exc,
+                )
+            installed.discard(provider_cls)
+
+        self._provider_guard_classes = installed
+        was_active = self._opencode_quota_guard_active
+        self._opencode_quota_guard_active = bool(installed)
+        if self._opencode_quota_guard_active and not was_active:
+            logger.info(
+                "[ProviderQuotaRouter] Provider call guard enabled: "
+                "classes=%s direct_route=%s error_cooldown=%s prefixes=%s",
+                sorted(provider_cls.__name__ for provider_cls in installed),
+                self.settings.route_direct_provider_calls_enabled,
+                self.settings.provider_error_cooldown_enabled,
+                self.settings.upstream_quota_provider_prefixes,
+            )
+
+    def _disable_opencode_quota_guard(self) -> None:
+        provider_classes = set(
+            getattr(self, "_provider_guard_classes", set())
+        )
+        if not self._opencode_quota_guard_active and not provider_classes:
+            return
+        for provider_cls in provider_classes:
+            try:
+                uninstall_opencode_quota_guard(self, provider_cls)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[ProviderQuotaRouter] failed to remove Provider call guard: "
+                    "class=%s error=%s",
+                    provider_cls.__name__,
+                    exc,
+                )
+        self._provider_guard_classes = set()
         self._opencode_quota_guard_active = False
 
     async def _clear_legacy_upstream_quota_cooldowns(self) -> None:
@@ -603,6 +660,13 @@ class ProviderQuotaRouterPlugin(Star):
         policy = build_provider_policy(provider=provider, settings=self.settings)
         return policy.first_response_timeout_seconds
 
+    def opencode_quota_guard_full_call_timeout_seconds(
+        self,
+        provider: Any,
+    ) -> int:
+        policy = build_provider_policy(provider=provider, settings=self.settings)
+        return policy.full_call_timeout_seconds
+
     def opencode_quota_guard_max_output_tokens(
         self,
         provider: Any,
@@ -648,9 +712,15 @@ class ProviderQuotaRouterPlugin(Star):
                     ),
                 )
             else:
+                timeout_kind = (
+                    "full-call"
+                    if type(exc).__name__ == "ProviderFullCallTimeoutError"
+                    else "first-response"
+                )
                 logger.warning(
-                    "[ProviderQuotaRouter] local first-response timeout: "
+                    "[ProviderQuotaRouter] local %s timeout: "
                     "provider=%s count=%d/%d model cooldown deferred",
+                    timeout_kind,
                     provider_id,
                     observation.count,
                     observation.threshold,
@@ -687,7 +757,7 @@ class ProviderQuotaRouterPlugin(Star):
         provider: Any,
         route_plan: Any,
     ) -> None:
-        if not isinstance(route_plan, RoutePlan):
+        if not isinstance(route_plan, (RoutePlan, DirectRoutePlan)):
             return
         router = route_plan.router
         if router.state is not self.state:
@@ -709,6 +779,52 @@ class ProviderQuotaRouterPlugin(Star):
             tokens=reservation_tokens,
             ttl_seconds=route_plan.settings.reservation_ttl_seconds,
         )
+
+    async def opencode_quota_guard_direct_text_chat(
+        self,
+        provider: Any,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> Any:
+        if not self._direct_provider_routing_enabled():
+            return DIRECT_ROUTE_NOT_HANDLED
+        return await self._get_direct_route_service().execute_text(
+            provider,
+            args,
+            kwargs,
+        )
+
+    def opencode_quota_guard_direct_text_chat_stream(
+        self,
+        provider: Any,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> Any:
+        if not self._direct_provider_routing_enabled():
+            return DIRECT_ROUTE_NOT_HANDLED
+        return self._get_direct_route_service().stream(provider, args, kwargs)
+
+    def _direct_provider_routing_enabled(self) -> bool:
+        return bool(
+            self.settings.enabled
+            and self.settings.route_direct_provider_calls_enabled
+            and not self.settings.dry_run
+        )
+
+    def _get_direct_route_service(self) -> DirectRouteService:
+        service = getattr(self, "_direct_route_service", None)
+        if isinstance(service, DirectRouteService):
+            return service
+        service = DirectRouteService(
+            state=self.state,
+            refresh_routes=self._refresh_fallback_config_if_changed,
+            get_router=lambda: self.router,
+            get_provider=self.context.get_provider_by_id,
+            report_provider_error=self.opencode_quota_guard_error,
+            logger=logger,
+        )
+        self._direct_route_service = service
+        return service
 
     async def _start_volcengine_403_circuit(
         self,
@@ -1083,6 +1199,7 @@ class ProviderQuotaRouterPlugin(Star):
             decision=decision,
             dry_run=settings.dry_run,
         )
+        payload["route_kind"] = "conversation"
         payload["safe_fallback_provider_ids"] = safe_fallback_ids
         payload["request_max_retries"] = (
             settings.provider_error_request_max_retries
@@ -1998,6 +2115,8 @@ class ProviderQuotaRouterPlugin(Star):
             "strict_priority_order": self.settings.strict_priority_order,
             "route_affinity_enabled": self.settings.route_affinity_enabled,
             "route_affinity_ttl_seconds": self.settings.route_affinity_ttl_seconds,
+            "route_direct_provider_calls_enabled": self.settings.route_direct_provider_calls_enabled,
+            "direct_provider_fallback_max_candidates": self.settings.direct_provider_fallback_max_candidates,
             "disable_astrbot_error_fallback": self.settings.disable_astrbot_error_fallback,
             "quota_cooldown_seconds": self.settings.quota_cooldown_seconds,
             "unlimited_provider_prefixes": list(
@@ -2019,11 +2138,15 @@ class ProviderQuotaRouterPlugin(Star):
             "provider_error_request_max_retries": self.settings.provider_error_request_max_retries,
             "provider_error_fallback_max_candidates": self.settings.provider_error_fallback_max_candidates,
             "provider_error_attempt_timeout_seconds": self.settings.provider_error_attempt_timeout_seconds,
+            "provider_error_full_call_timeout_seconds": self.settings.provider_error_full_call_timeout_seconds,
             "provider_policy_overrides": [
                 {
                     "provider_id": override.provider_id,
                     "first_response_timeout_seconds": (
                         override.first_response_timeout_seconds
+                    ),
+                    "full_call_timeout_seconds": (
+                        override.full_call_timeout_seconds
                     ),
                     "request_max_retries": override.request_max_retries,
                     "max_output_tokens": override.max_output_tokens,
@@ -2041,6 +2164,9 @@ class ProviderQuotaRouterPlugin(Star):
             "provider_error_suppress_current_chat": self.settings.provider_error_suppress_current_chat,
             "core_fallback_guard_active": self._core_fallback_guard_active,
             "opencode_quota_guard_active": self._opencode_quota_guard_active,
+            "provider_guard_class_count": len(
+                getattr(self, "_provider_guard_classes", set())
+            ),
             "fallback_watch_active": self._fallback_chain_is_dynamic,
             "fallback_request_check_active": (
                 self.settings.enabled and self._fallback_chain_is_dynamic
