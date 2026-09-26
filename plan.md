@@ -320,7 +320,7 @@ deepseek/deepseek-v4-pro
 `Provider.text_chat/text_chat_stream` 的插件请求，也复用 quota router 的额度、
 冷却、熔断、模态过滤和限量 fallback，不再持续撞击已冷却模型。
 
-状态：v0.16.0 实施中，详见 `21期plan.md`。
+状态：v0.16.0 已部署并开启；2026-09-27 完成 151 项测试及真实 Stealer 冷却跳过、同次故障替换复核，详见 `21期plan.md`。
 
 计划交付：
 

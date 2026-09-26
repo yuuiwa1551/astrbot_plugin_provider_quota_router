@@ -49,4 +49,15 @@
 
 ## 状态
 
-v0.16.0 实施中。
+v0.16.0 已部署并开启，2026-09-27 完成线上行为复核。
+
+- 功能提交 `279df3c` 已在源码仓 `origin/main`；实时容器挂载仍为
+  `D:\astrbot\data -> /AstrBot/data`。
+- 实时插件完整测试 151 项通过，`ruff check . --isolated`、编译和配置 JSON 校验通过。
+- 已存在的源码/运行时交付文件归一化 CRLF/LF 后内容全部一致；原始文件哈希存在换行差异。
+- 当日 02:18:21 的 Stealer 决策记录显示：请求的 `doubao-seed-2.1-lite`
+  为 `provider_error_cooldown`，实际只调用 `deepseek-v4.1-flash`，成功耗时 3630.58 ms。
+- 当日 01:42:02 的 Stealer 记录显示：首选完整调用达到 20 秒预算后，同次请求
+  fallback 到 `deepseek-v4.1-flash` 成功，备用模型调用耗时约 1949 ms。
+- 现场默认模型已更换，因此采用当前真实 Stealer 调用验证冷却跳过与故障替换，
+  未人为给旧 Mini 写入冷却。此次复核未另做状态 API 和浏览器页面交互测试。
