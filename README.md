@@ -6,6 +6,10 @@ AstrBot provider/model 日额度路由插件。它按配置的每日 token 额�
 
 ## 当前功能
 
+v0.16.1 修正：非流式完整生成超过预算只影响当前请求，不再累计全局模型健康冷却；
+流式首包超时和上游真实故障仍执行原健康策略。明确订阅失效即使返回 HTTP 400 也会
+冷却该 Provider 并允许 fallback。最近决策显示直调最终状态、错误与耗时。
+
 - 使用 AstrBot 原生 `ProviderStat` 统计当前窗口 token。
 - 默认按 `provider_model` 作为 quota key，也支持按 `provider_id`。
 - 默认使用 AstrBot 的 `default_provider_id + fallback_chat_models` 作为路由链。
@@ -228,6 +232,11 @@ AstrBot 的最终 `role=err` 响应不会经过普通的 Agent done hook，因�
 - Future：火山引擎官方用量 API 对账、按 API key/account 分组额度、与 provider 负载均衡插件集成。
 
 ## 更新历史
+
+### v0.16.1
+
+- 完整生成超时只结束当前尝试，流式首包超时才累计本地健康阈值。
+- 订阅失效 400 正确冷却并降级；修复 fallback 的响应用量归因，页面显示最终失败原因。
 
 ### v0.16.0
 

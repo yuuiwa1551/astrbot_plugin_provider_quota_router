@@ -1,6 +1,9 @@
 # AstrBot Provider Quota Router Spec
 
-## v0.16.0 当前契约
+## v0.16.1 当前契约
+
+- 非流式完整生成预算耗尽只影响当前请求，不累计模型健康冷却；连续阈值只适用于流式首包预算。
+- 明确 InvalidSubscription/订阅失效优先于一般 400 分类，冷却实际 Provider 并允许 fallback。
 
 - 独立源码仓库：`D:\astrbot\tmp_provider_quota_router_repo`；实时 Docker 数据根：`D:\astrbot\data -> /AstrBot/data`。不得把 `C:\Users\Administrator\astrbot` 当作当前运行目录。
 - 只有 `provider_source_id=openai` 命中的火山开发者计划使用本地日 token 保护；`volcengine-agent-plan/*`、中转站、DeepSeek 和其他 Token Plan 不参与该阈值。

@@ -1,5 +1,9 @@
 # AstrBot Provider Quota Router Plan
 
+## 22期 使用行为修复 v0.16.1
+
+详见 `22期plan.md`：完整生成预算与健康状态解耦、订阅失效分类、fallback usage 归因、最终结果展示。
+
 ## 总体策略
 
 新建独立插件 `astrbot_plugin_provider_quota_router`，负责全局 provider/model 日额度路由。插件不修改 AstrBot 核心，不改 `cmd_config.json` 默认 provider，不合并到现有第三方 `astrbot_plugin_token_controller`。

@@ -121,6 +121,8 @@ class DirectRouteService:
                 )
                 token = bind_provider_guard_route_plan(plan)
                 attempt_started = time.perf_counter()
+                final_response = None
+                actual_provider_id = selected_provider_id
                 try:
                     final_response = await selected_provider.text_chat(
                         *args,
@@ -257,6 +259,8 @@ class DirectRouteService:
                 )
                 token = bind_provider_guard_route_plan(plan)
                 attempt_started = time.perf_counter()
+                final_response = None
+                actual_provider_id = selected_provider_id
                 iterator: Any = None
                 try:
                     iterator = selected_provider.text_chat_stream(
@@ -515,6 +519,17 @@ class DirectRouteService:
                 "stream": plan.stream,
                 "direct_status": final_status,
                 "direct_attempts": attempts,
+                "final_error": (
+                    attempts[-1].get("error")
+                    if attempts and final_status != "success"
+                    else (
+                        unavailable_message(
+                            requested_provider_id=requested_provider_id,
+                            decision=plan.decision,
+                        )
+                        if not plan.decision.selected_provider_id else None
+                    )
+                ),
                 "fallback_reason": fallback_reason or None,
                 "planning_elapsed_ms": None,
                 "elapsed_ms": round(

@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.16.1
+
+- 非流式完整生成预算不再作为全局健康冷却依据，避免长分析任务影响普通聊天。
+- InvalidSubscription 优先于通用 HTTP 400 分类，冷却实际 Provider 并允许直调 fallback。
+- 每次尝试清空旧响应，避免失败 fallback 继承上一模型 usage；直调预占保持决策中的值。
+- 最近路由决策展示最终状态、末次错误和耗时。
+
 ## v0.16.0
 
 - 新增 `route_direct_provider_calls_enabled`，统一接管插件经 AstrBot Chat Provider 发出的 `llm_generate`、`tool_loop_agent`、`text_chat` 与 `text_chat_stream` 调用；升级默认关闭，本机显式开启。

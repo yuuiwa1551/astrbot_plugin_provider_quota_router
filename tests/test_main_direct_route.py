@@ -53,6 +53,7 @@ class DirectFakeProvider(Provider):
         )
         self.set_model(provider_id)
         self.response_text = response_text
+        self.response_role = "assistant"
         self.exception: Exception | None = None
         self.delay = 0.0
         self.stream_exception_after_first: Exception | None = None
@@ -76,7 +77,7 @@ class DirectFakeProvider(Provider):
         if self.exception is not None:
             raise self.exception
         return SimpleNamespace(
-            role="assistant",
+            role=self.response_role,
             completion_text=self.response_text,
             usage=SimpleNamespace(total=7),
         )
@@ -109,6 +110,21 @@ class FakeContext:
 
 
 class MainDirectRouteTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_fallback_does_not_charge_previous_response_usage(self) -> None:
+        requested = DirectFakeProvider("aux/mini", response_text="service unavailable")
+        requested.response_role = "err"
+        fallback = DirectFakeProvider("global/model")
+        fallback.provider_config["provider_source_id"] = "openai"
+        fallback.exception = TimeoutError("upstream timed out")
+        plugin = self._plugin(requested, fallback)
+        with self.assertRaises(TimeoutError):
+            await requested.text_chat(prompt="test")
+        snapshot = await plugin.state.snapshot()
+        self.assertEqual(snapshot["pending"], {})
+        self.assertEqual(snapshot["overlays"], [])
+        decisions = read_recent_decisions(plugin.state.decisions_path, limit=1)
+        self.assertIn("upstream timed out", decisions[0]["final_error"])
+
     async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)

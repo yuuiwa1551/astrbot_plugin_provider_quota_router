@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from core.config import RouterSettings
-from core.opencode_quota_guard import ProviderAttemptTimeoutError
+from core.opencode_quota_guard import ProviderAttemptTimeoutError, ProviderFullCallTimeoutError
 from core.state import QuotaStateStore
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -21,6 +21,23 @@ ProviderQuotaRouterPlugin = PLUGIN_MODULE.ProviderQuotaRouterPlugin
 
 
 class MainProviderErrorCooldownTests(unittest.IsolatedAsyncioTestCase):
+    async def test_full_generation_budget_does_not_poison_health(self) -> None:
+        plugin = object.__new__(ProviderQuotaRouterPlugin)
+        plugin.settings = RouterSettings()
+        provider = SimpleNamespace(
+            provider_config={"id": "relay/analysis"},
+            get_model=lambda: "analysis",
+        )
+        for _ in range(3):
+            await plugin.opencode_quota_guard_error(
+                provider,
+                ProviderFullCallTimeoutError("full call timed out after 20 seconds"),
+            )
+        self.assertEqual(
+            plugin._get_attempt_timeout_tracker().pending_count(provider_id="relay/analysis"),
+            0,
+        )
+
     async def test_first_local_attempt_timeout_does_not_open_circuit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             plugin = object.__new__(ProviderQuotaRouterPlugin)

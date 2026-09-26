@@ -38,6 +38,14 @@ def policy(
 
 
 class ErrorClassifierTests(unittest.TestCase):
+    def test_subscription_400_is_not_a_request_error(self) -> None:
+        error = "BadRequestError: Error code: 400 InvalidSubscription"
+        disposition = classify_provider_error(error=error, policy=policy())
+        self.assertEqual(disposition.kind, ERROR_PROVIDER_ACCOUNT)
+        self.assertEqual(disposition.scope, SCOPE_MODEL)
+        self.assertTrue(disposition.should_cooldown_model)
+        self.assertTrue(should_fallback_direct(error=error, disposition=disposition))
+
     def test_request_error_does_not_poison_provider_health(self) -> None:
         disposition = classify_provider_error(
             error="BadRequestError: Error code: 400 maximum context length",

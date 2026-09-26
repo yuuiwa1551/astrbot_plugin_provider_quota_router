@@ -726,6 +726,7 @@
                 <th>Action</th>
                 <th>Original</th>
                 <th>Selected</th>
+                <th>Result / ms</th>
                 <th>Affinity</th>
                 <th>Quota Key</th>
                 <th>Reason</th>
@@ -1045,9 +1046,10 @@
                 <td><span class="badge notice">${escapeHtml(item.action || "-")}</span></td>
                 <td>${escapeHtml(item.original_provider_id || "-")}</td>
                 <td>${escapeHtml(item.selected_provider_id || "-")}</td>
+                <td>${escapeHtml(item.direct_status || "-")} / ${escapeHtml(String(item.elapsed_ms ?? "-"))}</td>
                 <td>${escapeHtml(affinity + affinityExpiry)}</td>
                 <td>${escapeHtml(item.selected_quota_key || "-")}</td>
-                <td>${escapeHtml(item.reason || "-")}</td>
+                <td>${escapeHtml(item.final_error || item.fallback_reason || item.reason || "-")}</td>
               </tr>
             `;
           })

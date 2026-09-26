@@ -94,7 +94,7 @@ from .core.time_window import current_window, window_for_local_date
 
 
 PLUGIN_NAME = "astrbot_plugin_provider_quota_router"
-PLUGIN_VERSION = "0.16.0"
+PLUGIN_VERSION = "0.16.1"
 PLUGIN_REPOSITORY = "https://github.com/yuuiwa1551/astrbot_plugin_provider_quota_router"
 PLUGIN_DESCRIPTION = "按 provider/model 每日 token 额度自动降级路由 AstrBot 聊天模型。"
 HOOK_PRIORITY = 900
@@ -690,6 +690,13 @@ class ProviderQuotaRouterPlugin(Star):
         policy = build_provider_policy(provider=provider, settings=self.settings)
         disposition = classify_provider_error(error=exc, policy=policy)
         if disposition.kind == ERROR_LOCAL_ATTEMPT_TIMEOUT:
+            if "full call timed out after" in error_text.casefold():
+                logger.warning(
+                    "[ProviderQuotaRouter] full-call budget exhausted: "
+                    "provider=%s; request fallback only, health unchanged",
+                    provider_id,
+                )
+                return
             observation = self._get_attempt_timeout_tracker().record_timeout(
                 provider_id=provider_id,
                 threshold=(
@@ -766,6 +773,12 @@ class ProviderQuotaRouterPlugin(Star):
         if not provider_id:
             return
         reservation_tokens = router.reservation_tokens_for(provider_id)
+        if isinstance(route_plan, DirectRoutePlan):
+            reservation_tokens = next(
+                (item.reservation_tokens for item in route_plan.decision.candidates
+                 if item.provider_id == provider_id),
+                reservation_tokens,
+            )
         await self.state.retarget_reservation(
             request_id=route_plan.request_id,
             window_id=route_plan.window.window_id,

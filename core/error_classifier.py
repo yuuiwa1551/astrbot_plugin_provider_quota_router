@@ -177,6 +177,18 @@ def classify_provider_error(
             reason="provider_account_unavailable",
         )
 
+    if any(marker in normalized for marker in (
+        "invalidsubscription", "subscription has expired",
+        "does not have a valid agentplan subscription",
+    )):
+        return ErrorDisposition(
+            kind=ERROR_PROVIDER_ACCOUNT,
+            scope=SCOPE_MODEL,
+            should_fallback=True,
+            cooldown_seconds=policy.health_cooldown_seconds,
+            reason="provider_subscription_unavailable",
+        )
+
     if any(marker in normalized for marker in _REQUEST_ERROR_MARKERS):
         return ErrorDisposition(
             kind=ERROR_REQUEST,

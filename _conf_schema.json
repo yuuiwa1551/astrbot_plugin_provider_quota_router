@@ -210,7 +210,7 @@
   "provider_error_full_call_timeout_seconds": {
     "description": "非流式完整调用超时秒数",
     "type": "int",
-    "hint": "text_chat 完整生成的独立墙钟上限。默认 20 秒；Provider 专属 full_call_timeout_seconds 可覆盖，设为 0 关闭。",
+    "hint": "text_chat 完整生成的独立墙钟上限。默认 20 秒；长分析任务可用 Provider 专属 full_call_timeout_seconds 调大，0 关闭。超出预算只影响本次请求并允许安全 fallback，不累计全局健康冷却。",
     "default": 20
   },
   "provider_policy_overrides_json": {
